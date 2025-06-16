@@ -9,11 +9,15 @@ from datetime import datetime
 
 try:
     from .base_processor import BaseProcessor
+    from .enhanced_pdf_processor import EnhancedPDFProcessor
 except ImportError:
     class BaseProcessor:
         def __init__(self, config=None):
             self.config = config or {}
             self.logger = logging.getLogger(__name__)
+    
+    # Fallback if enhanced processor not available
+    EnhancedPDFProcessor = None
 
 
 class PDFProcessor(BaseProcessor):
@@ -65,6 +69,25 @@ class PDFProcessor(BaseProcessor):
         return result
 
 
-def create_pdf_processor(config: Optional[Dict[str, Any]] = None) -> PDFProcessor:
-    """Factory function to create PDF processor"""
-    return PDFProcessor(config) 
+def create_pdf_processor(config: Optional[Dict[str, Any]] = None,
+                        azure_config: Optional[Dict[str, Any]] = None) -> BaseProcessor:
+    """Create a PDF processor with optional Azure AI integration"""
+    azure_client = None
+    
+    # Try to create Azure AI client if config provided
+    if azure_config:
+        try:
+            from ...integrations.azure_ai.azure_client import AzureAIClient
+            azure_client = AzureAIClient(azure_config)
+            logging.info("Azure AI client created successfully for PDF processing")
+        except Exception as e:
+            logging.error(f"Failed to create Azure AI client: {e}")
+            logging.info("Falling back to basic PDF processor")
+    
+    # Use enhanced processor if available and Azure client created
+    if EnhancedPDFProcessor and azure_client:
+        logging.info("Using EnhancedPDFProcessor with Azure AI integration")
+        return EnhancedPDFProcessor(config=config, azure_client=azure_client)
+    else:
+        logging.info("Using basic PDFProcessor")
+        return PDFProcessor(config) 
