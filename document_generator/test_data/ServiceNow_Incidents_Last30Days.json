@@ -1,0 +1,122 @@
+[
+  {
+    "number": "INC030001",
+    "priority": "High",
+    "category": "Network",
+    "subcategory": "Wireless Connectivity",
+    "created": "2025-05-20 08:05:00",
+    "reporter": "Night Shift Supervisor",
+    "assigned_to": "Sarah Johnson",
+    "location": "Building C - Loading Bays 1-5",
+    "short_description": "No WiFi signal at loading dock - scanners not working",
+    "description": "Multiple handheld scanners unable to connect to WiFi at the Loading Bays 1-5. Workers cannot process shipments.",
+    "resolution": "Faulty PoE injector replaced. Signal restored to normal levels.",
+    "resolved": "2025-05-21 01:05:00",
+    "work_notes": [
+      "08:20 - Replacement parts ordered",
+      "09:52 - Equipment status checked",
+      "11:43 - On-site inspection completed",
+      "12:38 - Testing completed",
+      "14:10 - Identified root cause",
+      "14:49 - Configuration changes applied"
+    ],
+    "related_manager": "EMP004",
+    "related_building": "Building C"
+  },
+  {
+    "number": "INC030002",
+    "priority": "Medium",
+    "category": "Network",
+    "subcategory": "Signal Quality",
+    "created": "2025-05-21 19:05:00",
+    "reporter": "Security Team",
+    "assigned_to": "Robert Taylor",
+    "location": "Building B - Refrigerated Zone 8",
+    "short_description": "Intermittent WiFi drops during video calls",
+    "description": "Refrigerated Zone 8 experiencing frequent disconnections during Teams calls. Signal shows full bars but drops every 10-15 minutes.",
+    "resolution": "Channel optimization and power adjustment completed",
+    "resolved": "2025-05-23 01:05:00",
+    "work_notes": [
+      "19:20 - On-site inspection completed",
+      "19:48 - Testing completed",
+      "20:44 - Replacement parts ordered",
+      "22:07 - Identified root cause",
+      "00:04 - Configuration changes applied",
+      "00:19 - Equipment status checked"
+    ],
+    "related_manager": "EMP007",
+    "related_building": "Building B"
+  },
+  {
+    "number": "INC030003",
+    "priority": "Critical",
+    "category": "Infrastructure",
+    "subcategory": "Environmental",
+    "created": "2025-05-23 12:05:00",
+    "reporter": "Security Team",
+    "assigned_to": "David Chen",
+    "location": "Building B - Freezer Zone 2",
+    "short_description": "Network equipment failure in freezer - temperature alarm system offline",
+    "description": "Access point in Freezer Zone 2 has failed. Temperature monitoring system cannot communicate. Risk of product loss.",
+    "resolution": "Emergency replacement completed. Environmental enclosure heating element repaired.",
+    "resolved": "2025-05-25 12:05:00",
+    "work_notes": [
+      "12:20 - Identified root cause",
+      "12:50 - Configuration changes applied",
+      "13:11 - On-site inspection completed",
+      "14:25 - Solution implemented",
+      "15:41 - Initial investigation started",
+      "17:19 - Replacement parts ordered"
+    ],
+    "related_manager": "EMP003",
+    "related_building": "Building B"
+  },
+  {
+    "number": "INC030004",
+    "priority": "Low",
+    "category": "Network",
+    "subcategory": "Coverage Extension",
+    "created": "2025-05-25 12:05:00",
+    "reporter": "Security Team",
+    "assigned_to": "John Smith",
+    "location": "Building A - Main Warehouse",
+    "short_description": "Request WiFi coverage for new expansion area",
+    "description": "New area (Main Warehouse) coming online next month. Need network coverage for additional devices.",
+    "resolution": "Site survey completed. Installation scheduled.",
+    "resolved": "2025-05-26 05:05:00",
+    "work_notes": [
+      "12:20 - Identified root cause",
+      "12:41 - On-site inspection completed",
+      "13:37 - Solution implemented",
+      "14:27 - Testing completed",
+      "15:33 - Configuration changes applied",
+      "15:54 - Monitoring for stability"
+    ],
+    "related_manager": "EMP001",
+    "related_building": "Building A"
+  },
+  {
+    "number": "INC030005",
+    "priority": "High",
+    "category": "Security",
+    "subcategory": "Access Control",
+    "created": "2025-05-27 18:05:00",
+    "reporter": "Security Team",
+    "assigned_to": "Sarah Johnson",
+    "location": "Building C - Conveyor System",
+    "short_description": "Unauthorized access attempt to network equipment",
+    "description": "Security alert: Unknown device attempted connection to management VLAN in Conveyor System. Investigation needed.",
+    "resolution": "False alarm - contractor access credentials updated",
+    "resolved": "2025-05-29 05:05:00",
+    "work_notes": [
+      "18:20 - Testing completed",
+      "20:02 - Replacement parts ordered",
+      "20:17 - Identified root cause",
+      "20:41 - On-site inspection completed",
+      "22:39 - Monitoring for stability",
+      "00:29 - Solution implemented"
+    ],
+    "related_manager": "EMP004",
+    "related_building": "Building C"
+  }
+]

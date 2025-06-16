@@ -1,0 +1,15 @@
+# ServiceNow Configuration
+# Copy this file to .env and fill in your actual values
+
+# Your ServiceNow instance URL (without https://)
+# Example: dev12345.service-now.com
+SERVICENOW_INSTANCE=your-instance.service-now.com
+
+# ServiceNow username
+SERVICENOW_USERNAME=your_username
+
+# ServiceNow password
+SERVICENOW_PASSWORD=your_password
+
+# Optional: API version (defaults to latest)
+# SERVICENOW_API_VERSION=v1 

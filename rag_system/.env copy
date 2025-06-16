@@ -1,0 +1,234 @@
+# =============================================================================
+# RAG SYSTEM CONFIGURATION TEMPLATE
+# =============================================================================
+# Copy this to .env and fill in your values
+# Required values are marked with ⚠️ REQUIRED
+# Optional values have defaults but can be customized
+
+# =============================================================================
+# 🔑 API KEYS & CREDENTIALS (⚠️ REQUIRED)
+# =============================================================================
+
+# LLM Provider API Keys (choose at least one)
+GROQ_API_KEY=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
+OPENAI_API_KEY=                               # Optional: Get from: https://platform.openai.com/api-keys
+ANTHROPIC_API_KEY=                            # Optional: Get from: https://console.anthropic.com/
+COHERE_API_KEY=YImzYzMFZulvXwRr1DoqAj9skOHP9YiNNBEOSEhi
+# System Security
+RAG_API_KEY=                                  # ⚠️ Create a secure random key (e.g., "rag_12345_secure_key_67890")
+
+# =============================================================================
+# 🏢 SERVICENOW INTEGRATION (Optional)
+# =============================================================================
+# Fill these if you want to ingest ServiceNow tickets
+SERVICENOW_INSTANCE=dev319029.service-now.com
+SERVICENOW_USERNAME=admin
+SERVICENOW_PASSWORD=/XET=jx1o1Ud
+SERVICENOW_TABLE=incident                     # Table to query (default: incident)
+
+# =============================================================================
+# 🖥️ SYSTEM CONFIGURATION
+# =============================================================================
+
+# Environment
+RAG_ENVIRONMENT=development                    # Options: development, staging, production
+
+# API Server
+RAG_API_HOST=0.0.0.0                         # Host to bind to (0.0.0.0 for all interfaces)
+RAG_API_PORT=8000                            # Port for API server
+RAG_API_KEY_REQUIRED=true                    # Enable/disable API key authentication
+
+# Data Storage
+RAG_DATA_DIR=./data                          # Directory for data storage
+RAG_BACKUP_DIR=./data/backups                # Directory for backups
+RAG_MAX_FILE_SIZE_MB=100                     # Maximum file upload size
+
+# =============================================================================
+# 🤖 LLM CONFIGURATION
+# =============================================================================
+
+# Primary LLM Provider
+RAG_LLM_PROVIDER=groq                        # Options: groq, openai, anthropic
+RAG_LLM_MODEL=llama-3.1-70b-versatile       # Model name (see options below)
+RAG_LLM_MAX_TOKENS=2048                      # Maximum tokens in response
+RAG_LLM_TEMPERATURE=0.1                      # Randomness (0.0-2.0, lower = more focused)
+
+# Fallback LLM (optional)
+RAG_LLM_FALLBACK_PROVIDER=                   # Fallback provider if primary fails
+RAG_LLM_FALLBACK_MODEL=                      # Fallback model
+
+# =============================================================================
+# 🧠 EMBEDDING CONFIGURATION
+# =============================================================================
+
+# Embedding Provider
+RAG_EMBEDDING_PROVIDER=huggingface           # Options: huggingface, cohere, openai
+RAG_EMBEDDING_MODEL=all-MiniLM-L6-v2         # Model name (see options below)
+
+# Text Processing
+RAG_CHUNK_SIZE=512                           # Size of text chunks
+RAG_CHUNK_OVERLAP=50                         # Overlap between chunks
+RAG_MAX_CHUNKS_PER_FILE=1000                 # Maximum chunks per file
+
+# =============================================================================
+# 🔍 VECTOR SEARCH CONFIGURATION
+# =============================================================================
+
+# FAISS Index
+RAG_FAISS_INDEX_TYPE=IndexFlatL2             # Options: IndexFlatL2, IndexIVFFlat, IndexHNSWFlat
+RAG_FAISS_DIMENSION=384                      # Embedding dimension (must match model)
+
+# Query Processing
+RAG_MAX_QUERY_RESULTS=10                     # Maximum results per query
+RAG_RETRIEVAL_K=20                           # Initial retrieval count (before reranking)
+
+# =============================================================================
+# ⏰ SCHEDULING & AUTOMATION
+# =============================================================================
+
+# Ingestion Schedule
+RAG_INGESTION_INTERVAL=60                    # Minutes between file scans
+RAG_SERVICENOW_SYNC_INTERVAL=120             # Minutes between ServiceNow syncs
+RAG_CLEANUP_INTERVAL=1440                    # Minutes between cleanup runs (1440 = 24 hours)
+
+# Processing Limits
+RAG_MAX_CONCURRENT_JOBS=3                    # Maximum parallel ingestion jobs
+RAG_JOB_TIMEOUT_MINUTES=30                   # Timeout for ingestion jobs
+
+# =============================================================================
+# 📊 MONITORING & LOGGING
+# =============================================================================
+
+# Logging
+RAG_LOG_LEVEL=INFO                           # Options: DEBUG, INFO, WARNING, ERROR, CRITICAL
+RAG_LOG_FILE=./logs/app.log                  # Log file path
+RAG_LOG_MAX_SIZE_MB=10                       # Maximum log file size
+RAG_LOG_BACKUP_COUNT=5                       # Number of log file backups
+
+# Metrics
+RAG_METRICS_ENABLED=true                     # Enable metrics collection
+RAG_HEALTH_CHECK_INTERVAL=60                 # Seconds between health checks
+
+# =============================================================================
+# 🌐 API & SECURITY CONFIGURATION
+# =============================================================================
+
+# CORS (Cross-Origin Resource Sharing)
+RAG_CORS_ENABLED=true                        # Enable CORS for web frontends
+RAG_CORS_ORIGINS=*                           # Allowed origins (* = all, or comma-separated list)
+
+# Rate Limiting
+RAG_RATE_LIMIT_RPM=100                       # Requests per minute per IP
+RAG_RATE_LIMIT_ENABLED=true                  # Enable rate limiting
+
+# =============================================================================
+# 🗄️ BACKUP & RETENTION
+# =============================================================================
+
+# Backup Settings
+RAG_BACKUP_RETENTION_DAYS=30                 # Days to keep backups
+RAG_AUTO_BACKUP_ENABLED=true                 # Enable automatic backups
+RAG_BACKUP_SCHEDULE=daily                    # Backup frequency: daily, weekly
+
+# Data Retention
+RAG_LOG_RETENTION_DAYS=90                    # Days to keep logs
+RAG_METRICS_RETENTION_DAYS=30                # Days to keep metrics
+
+# =============================================================================
+# 📁 FILE PROCESSING CONFIGURATION
+# =============================================================================
+
+# Supported File Types
+RAG_SUPPORTED_EXTENSIONS=.txt,.pdf,.docx,.md # Comma-separated file extensions
+RAG_WATCH_DIRECTORIES=./data/uploads         # Directories to monitor for new files
+
+# Processing Options
+RAG_EXTRACT_METADATA=true                    # Enable metadata extraction
+RAG_OCR_ENABLED=false                        # Enable OCR for scanned documents (requires tesseract)
+
+# =============================================================================
+# 🏗️ ADVANCED CONFIGURATION (Optional)
+# =============================================================================
+
+# Database (if migrating from JSON to database later)
+RAG_DB_TYPE=json                            # Options: json, postgresql, sqlite
+RAG_DB_URL=                                  # Database URL (for future use)
+
+# Caching
+RAG_CACHE_ENABLED=false                      # Enable Redis caching (requires Redis)
+RAG_CACHE_URL=redis://localhost:6379        # Redis URL
+
+# Performance
+RAG_WORKER_THREADS=4                         # Number of worker threads
+RAG_BATCH_SIZE=32                            # Batch size for embedding
+
+# Security
+RAG_ENABLE_HTTPS=false                       # Enable HTTPS (requires SSL certificates)
+RAG_SSL_CERT_PATH=                          # Path to SSL certificate
+RAG_SSL_KEY_PATH=                           # Path to SSL private key
+
+# =============================================================================
+# 📋 CONFIGURATION REFERENCE
+# =============================================================================
+
+# Available LLM Models by Provider:
+# 
+# GROQ:
+# - llama-3.1-70b-versatile (recommended)
+# - llama-3.1-8b-instant
+# - mixtral-8x7b-32768
+# - gemma-7b-it
+#
+# OPENAI:
+# - gpt-4-turbo-preview
+# - gpt-4
+# - gpt-3.5-turbo
+#
+# ANTHROPIC:
+# - claude-3-opus-20240229
+# - claude-3-sonnet-20240229
+# - claude-3-haiku-20240307
+
+# Available Embedding Models by Provider:
+#
+# HUGGINGFACE:
+# - all-MiniLM-L6-v2 (384 dim, recommended for most use cases)
+# - all-mpnet-base-v2 (768 dim, higher quality)
+# - sentence-transformers/all-roberta-large-v1 (1024 dim, best quality)
+#
+# COHERE:
+# - embed-english-v3.0 (1024 dim)
+# - embed-multilingual-v3.0 (1024 dim)
+#
+# OPENAI:
+# - text-embedding-ada-002 (1536 dim)
+# - text-embedding-3-small (1536 dim)
+# - text-embedding-3-large (3072 dim)
+
+# =============================================================================
+# 🔧 QUICK SETUP EXAMPLES
+# =============================================================================
+
+# Minimal Setup (Groq + HuggingFace):
+# GROQ_API_KEY=gsk_your_groq_key_here
+# RAG_API_KEY=my_secure_api_key_123
+# RAG_LLM_PROVIDER=groq
+# RAG_EMBEDDING_PROVIDER=huggingface
+
+# Production Setup (OpenAI + Cohere):
+# OPENAI_API_KEY=sk-your_openai_key_here
+# COHERE_API_KEY=your_cohere_key_here
+# RAG_API_KEY=production_secure_key_456
+# RAG_LLM_PROVIDER=openai
+# RAG_LLM_MODEL=gpt-4-turbo-preview
+# RAG_EMBEDDING_PROVIDER=cohere
+# RAG_EMBEDDING_MODEL=embed-english-v3.0
+# RAG_ENVIRONMENT=production
+# RAG_LOG_LEVEL=WARNING
+
+# High-Performance Setup:
+# RAG_CHUNK_SIZE=1024
+# RAG_MAX_CHUNKS_PER_FILE=2000
+# RAG_WORKER_THREADS=8
+# RAG_BATCH_SIZE=64
+# RAG_FAISS_INDEX_TYPE=IndexHNSWFlat

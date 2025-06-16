@@ -1,0 +1,181 @@
+RAG SYSTEM KNOWLEDGE BASE - SAMPLE DOCUMENT
+==============================================
+
+DOCUMENT TYPE: Plain Text (.txt)
+CREATED: 2025-06-07
+PURPOSE: Test document for RAG system ingestion and retrieval
+
+==============================================
+SECTION 1: TECHNICAL TROUBLESHOOTING
+==============================================
+
+Common Database Issues:
+- Connection timeouts: Check network connectivity and firewall settings
+- Slow query performance: Analyze query execution plans and consider indexing
+- Lock contention: Review transaction isolation levels and query patterns
+- Memory errors: Monitor buffer pool usage and adjust configuration
+
+API Integration Problems:
+- Authentication failures: Verify API keys and token expiration
+- Rate limiting: Implement exponential backoff and respect rate limits
+- Timeout errors: Increase timeout values and implement retry logic
+- Data format issues: Validate JSON schema and field mappings
+
+Network Connectivity:
+- DNS resolution failures: Check DNS server configuration
+- SSL certificate errors: Verify certificate validity and trust chain
+- Firewall blocking: Review firewall rules and port accessibility
+- Load balancer issues: Check health checks and backend server status
+
+==============================================
+SECTION 2: BUSINESS PROCESSES
+==============================================
+
+Incident Management Workflow:
+1. Incident Detection - Automated monitoring or user reports
+2. Initial Assessment - Categorize severity and impact
+3. Assignment - Route to appropriate technical team
+4. Investigation - Analyze logs, reproduce issue, identify root cause
+5. Resolution - Implement fix and verify solution
+6. Documentation - Update knowledge base and close ticket
+
+Change Management Process:
+1. Change Request - Submit formal change proposal
+2. Impact Assessment - Evaluate risks and dependencies
+3. Approval - Review board approval for significant changes
+4. Implementation Planning - Create detailed implementation plan
+5. Testing - Validate changes in non-production environment
+6. Deployment - Execute change during approved maintenance window
+7. Verification - Confirm successful implementation
+8. Post-Implementation Review - Document lessons learned
+
+Customer Support Escalation:
+- Level 1: Basic troubleshooting and common issues (0-2 hours)
+- Level 2: Advanced technical support and system analysis (2-8 hours)
+- Level 3: Engineering team involvement for complex issues (8-24 hours)
+- Critical: Immediate escalation for system-down scenarios
+
+==============================================
+SECTION 3: PRODUCT INFORMATION
+==============================================
+
+Software Products:
+- Enterprise CRM: Customer relationship management platform
+  Features: Lead tracking, sales pipeline, customer analytics
+  Pricing: $50/user/month for Professional, $100/user/month for Enterprise
+  
+- Business Intelligence Suite: Data analytics and reporting platform
+  Features: Real-time dashboards, custom reports, data visualization
+  Pricing: $25/user/month for Standard, $75/user/month for Premium
+  
+- Project Management Tool: Collaborative project planning and tracking
+  Features: Task management, resource allocation, time tracking
+  Pricing: $15/user/month for Basic, $30/user/month for Advanced
+
+Hardware Products:
+- Network Security Appliance: Next-generation firewall solution
+  Specifications: 10Gbps throughput, 500,000 concurrent sessions
+  Price: $15,000 for NSA-5000 model
+  
+- Storage Array: High-performance SAN storage system
+  Specifications: 100TB capacity, 50,000 IOPS, dual controller
+  Price: $75,000 for SA-100T model
+
+==============================================
+SECTION 4: COMPANY POLICIES
+==============================================
+
+Security Policies:
+- Password Requirements: Minimum 12 characters, complexity requirements
+- Multi-Factor Authentication: Required for all administrative accounts
+- Data Classification: Public, Internal, Confidential, Restricted levels
+- Access Control: Role-based permissions with regular access reviews
+
+HR Policies:
+- Remote Work: Hybrid model with 3 days in office, 2 days remote
+- Vacation Policy: Unlimited PTO with manager approval
+- Professional Development: $2,000 annual budget per employee
+- Performance Reviews: Quarterly check-ins with annual formal review
+
+IT Policies:
+- Software Installation: Approved software list, admin approval required
+- Data Backup: Daily automated backups with monthly restore testing
+- Incident Response: 15-minute response time for critical issues
+- Equipment Refresh: Laptops replaced every 3 years, servers every 5 years
+
+==============================================
+SECTION 5: FREQUENTLY ASKED QUESTIONS
+==============================================
+
+Q: How do I reset my password?
+A: Use the self-service password reset portal at portal.company.com/reset or contact IT support at ext. 4357.
+
+Q: What are the supported browsers for our web applications?
+A: Chrome 90+, Firefox 88+, Safari 14+, Edge 90+. Internet Explorer is not supported.
+
+Q: How do I request new software installation?
+A: Submit a request through the IT service portal with business justification and manager approval.
+
+Q: What is the process for reporting a security incident?
+A: Immediately contact the security team at security@company.com or call the emergency hotline at ext. 9999.
+
+Q: How do I access the VPN?
+A: Download the VPN client from the IT portal, use your domain credentials, and connect to vpn.company.com.
+
+Q: What are the backup and recovery procedures?
+A: Daily backups are performed automatically. For data recovery, submit a ticket with specific file/folder details and required restore date.
+
+==============================================
+SECTION 6: CONTACT INFORMATION
+==============================================
+
+IT Support:
+- Help Desk: ext. 4357 or helpdesk@company.com
+- Hours: Monday-Friday 8:00 AM - 6:00 PM EST
+- Emergency: ext. 9999 (24/7 for critical issues)
+
+Department Contacts:
+- Human Resources: hr@company.com, ext. 4200
+- Finance: finance@company.com, ext. 4300
+- Sales: sales@company.com, ext. 4100
+- Marketing: marketing@company.com, ext. 4150
+- Engineering: engineering@company.com, ext. 4500
+
+Management Team:
+- CEO: John Smith, jsmith@company.com
+- CTO: Sarah Johnson, sjohnson@company.com
+- CFO: Mike Davis, mdavis@company.com
+- VP Sales: Lisa Wilson, lwilson@company.com
+
+==============================================
+SECTION 7: SYSTEM SPECIFICATIONS
+==============================================
+
+Production Environment:
+- Web Servers: 4x Ubuntu 20.04 LTS, 16GB RAM, 8 CPU cores
+- Database: PostgreSQL 13.x cluster, 64GB RAM, 16 CPU cores
+- Load Balancer: HAProxy 2.4, SSL termination, health checks
+- Monitoring: Prometheus + Grafana, 24/7 alerting
+
+Development Environment:
+- Version Control: Git with GitLab Enterprise
+- CI/CD: GitLab CI with automated testing and deployment
+- Testing: Jest for unit tests, Cypress for integration tests
+- Code Quality: SonarQube for static analysis
+
+Network Infrastructure:
+- Internet: Dual 1Gbps fiber connections with failover
+- Internal: 10Gbps backbone with 1Gbps to desktops
+- WiFi: Enterprise WPA3 with guest network isolation
+- Security: Next-gen firewall with IPS/IDS capabilities
+
+==============================================
+END OF DOCUMENT
+==============================================
+
+This document contains sample information for testing the RAG system's ability to:
+- Index and retrieve technical troubleshooting information
+- Answer questions about business processes and policies
+- Provide product specifications and pricing
+- Locate contact information and system details
+- Handle various content types and formatting styles 

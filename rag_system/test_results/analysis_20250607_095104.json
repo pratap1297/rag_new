@@ -1,0 +1,674 @@
+{
+  "test_results": [
+    {
+      "test_name": "system_health_basic",
+      "status": "PASS",
+      "duration_ms": 2045.7091331481934,
+      "details": {
+        "status_code": 200,
+        "response_data": {
+          "status": "healthy",
+          "timestamp": "2025-06-07T09:49:08.633065",
+          "components": {
+            "api": {
+              "status": "healthy"
+            },
+            "container": {
+              "status": "healthy",
+              "services": 10
+            }
+          },
+          "issues": []
+        },
+        "response_time_ms": 2043.384
+      },
+      "error_message": null,
+      "timestamp": "2025-06-07T09:49:08.635082"
+    },
+    {
+      "test_name": "system_health_components",
+      "status": "PASS",
+      "duration_ms": 10493.318796157837,
+      "details": {
+        "total_components": 9,
+        "healthy_components": 7,
+        "components": [
+          {
+            "name": "API Server",
+            "status": "critical",
+            "response_time_ms": 7047.885179519653,
+            "last_check": "2025-06-07T09:49:17.703984",
+            "details": {
+              "error_type": "ReadTimeout"
+            },
+            "error_message": "HTTPConnectionPool(host='localhost', port=8000): Read timed out. (read timeout=5)"
+          },
+          {
+            "name": "Storage Layer",
+            "status": "healthy",
+            "response_time_ms": 0.9975433349609375,
+            "last_check": "2025-06-07T09:49:17.704981",
+            "details": {
+              "data_directory": "data",
+              "directories_status": {
+                "metadata": true,
+                "vectors": true,
+                "logs": true,
+                "config": true
+              },
+              "write_permission": true,
+              "disk_total_gb": 99.98,
+              "disk_used_gb": 16.71,
+              "disk_free_gb": 83.27,
+              "disk_usage_percent": 16.7
+            },
+            "error_message": null
+          },
+          {
+            "name": "Vector Store (FAISS)",
+            "status": "healthy",
+            "response_time_ms": 0.5071163177490234,
+            "last_check": "2025-06-07T09:49:17.705488",
+            "details": {
+              "vector_count": 159,
+              "dimension": 1024,
+              "active_vectors": 159,
+              "deleted_vectors": 0,
+              "metadata_count": 159,
+              "index_type": "IndexFlatIP",
+              "next_id": 159,
+              "index_size_mb": 0.6211366653442383,
+              "is_trained": true,
+              "status": "healthy",
+              "search_test_time_ms": 0.5071163177490234,
+              "search_successful": true,
+              "index_file_exists": true
+            },
+            "error_message": null
+          },
+          {
+            "name": "Embedding Service (Cohere)",
+            "status": "healthy",
+            "response_time_ms": 78.04012298583984,
+            "last_check": "2025-06-07T09:49:17.783528",
+            "details": {
+              "provider": "cohere",
+              "model": "embed-english-v3.0",
+              "expected_dimension": 1024,
+              "actual_dimension": 1024,
+              "test_embedding_sample": [
+                0.041107178,
+                0.03225708,
+                -0.043121338,
+                -0.056732178,
+                0.002603531
+              ],
+              "embedding_successful": true
+            },
+            "error_message": null
+          },
+          {
+            "name": "LLM Service (Groq)",
+            "status": "healthy",
+            "response_time_ms": 183.73727798461914,
+            "last_check": "2025-06-07T09:49:17.967266",
+            "details": {
+              "provider": "groq",
+              "model": "meta-llama/llama-4-maverick-17b-128e-instruct",
+              "test_response": "Health check successful",
+              "response_length": 23,
+              "response_valid": true,
+              "api_key_configured": true
+            },
+            "error_message": null
+          }
+        ]
+      },
+      "error_message": null,
+      "timestamp": "2025-06-07T09:49:19.128401"
+    },
+    {
+      "test_name": "system_health_resources",
+      "status": "PASS",
+      "duration_ms": 2033.432960510254,
+      "details": {
+        "total_files": 0,
+        "total_chunks": 0,
+        "total_vectors": 0,
+        "system_status": "healthy"
+      },
+      "error_message": null,
+      "timestamp": "2025-06-07T09:49:21.161834"
+    },
+    {
+      "test_name": "system_health_dependencies",
+      "status": "PASS",
+      "duration_ms": 2202.056646347046,
+      "details": {
+        "llm_working": false,
+        "embeddings_working": true,
+        "response_time_ms": 2200.1040000000003
+      },
+      "error_message": null,
+      "timestamp": "2025-06-07T09:49:23.363891"
+    },
+    {
+      "test_name": "api_get__health",
+      "status": "PASS",
+      "duration_ms": 2417.9232120513916,
+      "details": {
+        "status_code": 200,
+        "response_time_ms": 2416.793,
+        "response_size": 162
+      },
+      "error_message": null,
+      "timestamp": "2025-06-07T09:49:25.783610"
+    },
+    {
+      "test_name": "api_post__query",
+      "status": "PASS",
+      "duration_ms": 2189.831256866455,
+      "details": {
+        "status_code": 200,
+        "response_time_ms": 2189.5389999999998,
+        "response_size": 1445
+      },
+      "error_message": null,
+      "timestamp": "2025-06-07T09:49:27.974440"
+    },
+    {
+      "test_name": "api_get__stats",
+      "status": "PASS",
+      "duration_ms": 2041.912317276001,
+      "details": {
+        "status_code": 200,
+        "response_time_ms": 2041.303,
+        "response_size": 409
+      },
+      "error_message": null,
+      "timestamp": "2025-06-07T09:49:30.016352"
+    },
+    {
+      "test_name": "doc_upload_network_security.txt",
+      "status": "PASS",
+      "duration_ms": 2114.8149967193604,
+      "details": {
+        "status": "success",
+        "filename": "network_security.txt",
+        "file_size": 1146,
+        "chunks_created": 1
+      },
+      "error_message": null,
+      "timestamp": "2025-06-07T09:49:32.132173"
+    },
+    {
+      "test_name": "doc_upload_cisco_bgp_advanced.txt",
+      "status": "PASS",
+      "duration_ms": 2136.2435817718506,
+      "details": {
+        "status": "success",
+        "filename": "cisco_bgp_advanced.txt",
+        "file_size": 1057,
+        "chunks_created": 1
+      },
+      "error_message": null,
+      "timestamp": "2025-06-07T09:49:34.268417"
+    },
+    {
+      "test_name": "doc_processing_verification",
+      "status": "PASS",
+      "duration_ms": 5205.303907394409,
+      "details": {
+        "processed_files": 0,
+        "created_chunks": 0,
+        "generated_vectors": 0,
+        "processing_successful": false
+      },
+      "error_message": null,
+      "timestamp": "2025-06-07T09:49:39.473721"
+    },
+    {
+      "test_name": "query_quality_0",
+      "status": "PASS",
+      "duration_ms": 4876.254320144653,
+      "details": {
+        "query": "How do I configure BGP route filtering?",
+        "answer_length": 0,
+        "source_count": 5,
+        "topic_coverage_score": 0.0,
+        "has_sources": true,
+        "topics_found": []
+      },
+      "error_message": null,
+      "timestamp": "2025-06-07T09:49:44.350976"
+    },
+    {
+      "test_name": "query_quality_1",
+      "status": "PASS",
+      "duration_ms": 4521.165132522583,
+      "details": {
+        "query": "What are the best practices for network security?",
+        "answer_length": 0,
+        "source_count": 5,
+        "topic_coverage_score": 0.0,
+        "has_sources": true,
+        "topics_found": []
+      },
+      "error_message": null,
+      "timestamp": "2025-06-07T09:49:48.872141"
+    },
+    {
+      "test_name": "query_quality_2",
+      "status": "PASS",
+      "duration_ms": 4587.101459503174,
+      "details": {
+        "query": "Explain cloud architecture scalability patterns",
+        "answer_length": 0,
+        "source_count": 5,
+        "topic_coverage_score": 0.0,
+        "has_sources": true,
+        "topics_found": []
+      },
+      "error_message": null,
+      "timestamp": "2025-06-07T09:49:53.459243"
+    },
+    {
+      "test_name": "query_consistency",
+      "status": "PASS",
+      "duration_ms": 11351.407766342163,
+      "details": {
+        "response_count": 3,
+        "average_answer_length": 0,
+        "answer_length_variance": 0,
+        "average_source_count": 3,
+        "consistency_score": 1.0
+      },
+      "error_message": null,
+      "timestamp": "2025-06-07T09:50:04.810651"
+    },
+    {
+      "test_name": "performance_response_time",
+      "status": "PASS",
+      "duration_ms": 7659.806489944458,
+      "details": {
+        "test_queries": 3,
+        "average_response_time_ms": 2553.268829981486,
+        "max_response_time_ms": 2891.103744506836,
+        "response_time_details": [
+          {
+            "query": "simple query",
+            "total_time_ms": 2292.0849323272705
+          },
+          {
+            "query": "What are the comprehensive bes",
+            "total_time_ms": 2891.103744506836
+          },
+          {
+            "query": "BGP configuration",
+            "total_time_ms": 2476.6178131103516
+          }
+        ]
+      },
+      "error_message": null,
+      "timestamp": "2025-06-07T09:50:12.471210"
+    },
+    {
+      "test_name": "performance_throughput",
+      "status": "PASS",
+      "duration_ms": 15512.658834457397,
+      "details": {
+        "total_queries": 16,
+        "successful_queries": 16,
+        "total_time_seconds": 15.512658834457397,
+        "throughput_qps": 1.0314157083413773,
+        "success_rate": 1.0
+      },
+      "error_message": null,
+      "timestamp": "2025-06-07T09:50:27.983869"
+    },
+    {
+      "test_name": "concurrency_queries",
+      "status": "PASS",
+      "duration_ms": 2678.40838432312,
+      "details": {
+        "total_queries": 3,
+        "successful_queries": 3,
+        "total_time_ms": 2678.40838432312,
+        "average_response_time_ms": 2585.7653333333333,
+        "queries_per_second": 1.1200681783850344
+      },
+      "error_message": null,
+      "timestamp": "2025-06-07T09:50:30.662277"
+    },
+    {
+      "test_name": "edge_invalid_queries",
+      "status": "PASS",
+      "duration_ms": 6846.015214920044,
+      "details": {
+        "invalid_queries_tested": 3,
+        "gracefully_handled": 3,
+        "handling_rate": 1.0,
+        "test_results": [
+          {
+            "query": "empty",
+            "status_code": 400,
+            "handled_gracefully": true,
+            "response_time_ms": 2028.705
+          },
+          {
+            "query": " ",
+            "status_code": 200,
+            "handled_gracefully": true,
+            "response_time_ms": 2365.828
+          },
+          {
+            "query": "aaaaaaaaaaaaaaaaaaaa",
+            "status_code": 200,
+            "handled_gracefully": true,
+            "response_time_ms": 2449.116
+          }
+        ]
+      },
+      "error_message": null,
+      "timestamp": "2025-06-07T09:50:37.509293"
+    },
+    {
+      "test_name": "security_input_validation",
+      "status": "PASS",
+      "duration_ms": 8667.300701141357,
+      "details": {
+        "injection_tests": 3,
+        "safe_responses": 0,
+        "safety_rate": 0.0,
+        "test_details": [
+          {
+            "injection_type": "'; DROP TABLE docume...",
+            "status_code": 200,
+            "contains_payload": true,
+            "safe_response": false,
+            "response_length": 3730
+          },
+          {
+            "injection_type": "<script>alert('xss')...",
+            "status_code": 200,
+            "contains_payload": true,
+            "safe_response": false,
+            "response_length": 2867
+          },
+          {
+            "injection_type": "../../../../etc/pass...",
+            "status_code": 200,
+            "contains_payload": true,
+            "safe_response": false,
+            "response_length": 2455
+          }
+        ]
+      },
+      "error_message": null,
+      "timestamp": "2025-06-07T09:50:46.176593"
+    },
+    {
+      "test_name": "integration_llm",
+      "status": "PASS",
+      "duration_ms": 2259.9143981933594,
+      "details": {
+        "llm_responding": false,
+        "test_passed": false,
+        "answer_preview": ""
+      },
+      "error_message": null,
+      "timestamp": "2025-06-07T09:50:48.437509"
+    },
+    {
+      "test_name": "integration_embeddings",
+      "status": "PASS",
+      "duration_ms": 2702.2929191589355,
+      "details": {
+        "embedding_working": true,
+        "sources_found": 3,
+        "response_time_ms": 2701.28
+      },
+      "error_message": null,
+      "timestamp": "2025-06-07T09:50:51.139802"
+    }
+  ],
+  "performance_metrics": {
+    "system_metrics": {
+      "faiss_store": {
+        "vector_count": 165,
+        "dimension": 1024,
+        "active_vectors": 165,
+        "deleted_vectors": 0,
+        "metadata_count": 165,
+        "index_type": "IndexFlatIP",
+        "next_id": 165,
+        "index_size_mb": 0.6445741653442383,
+        "is_trained": true,
+        "status": "healthy"
+      },
+      "metadata_store": {
+        "total_files": 34,
+        "total_chunks": 4,
+        "collections": 2,
+        "collections_info": {
+          "files_metadata": {
+            "count": 34
+          },
+          "chunks_metadata": {
+            "count": 4
+          }
+        }
+      },
+      "timestamp": 1749289853.1611667
+    },
+    "test_execution_metrics": {
+      "total_tests": 21,
+      "passed_tests": 21,
+      "failed_tests": 0,
+      "average_test_duration_ms": 4978.232020423526,
+      "test_success_rate": 1.0
+    }
+  },
+  "system_health": {
+    "overall_status": "critical",
+    "timestamp": "2025-06-07T09:51:03.537640",
+    "uptime_seconds": 911,
+    "components": [
+      {
+        "name": "API Server",
+        "status": "critical",
+        "response_time_ms": 7032.879114151001,
+        "last_check": "2025-06-07T09:51:02.227293",
+        "details": {
+          "error_type": "ReadTimeout"
+        },
+        "error_message": "HTTPConnectionPool(host='localhost', port=8000): Read timed out. (read timeout=5)"
+      },
+      {
+        "name": "Storage Layer",
+        "status": "healthy",
+        "response_time_ms": 0.0,
+        "last_check": "2025-06-07T09:51:02.227293",
+        "details": {
+          "data_directory": "data",
+          "directories_status": {
+            "metadata": true,
+            "vectors": true,
+            "logs": true,
+            "config": true
+          },
+          "write_permission": true,
+          "disk_total_gb": 99.98,
+          "disk_used_gb": 16.71,
+          "disk_free_gb": 83.27,
+          "disk_usage_percent": 16.7
+        },
+        "error_message": null
+      },
+      {
+        "name": "Vector Store (FAISS)",
+        "status": "healthy",
+        "response_time_ms": 0.0,
+        "last_check": "2025-06-07T09:51:02.227293",
+        "details": {
+          "vector_count": 165,
+          "dimension": 1024,
+          "active_vectors": 165,
+          "deleted_vectors": 0,
+          "metadata_count": 165,
+          "index_type": "IndexFlatIP",
+          "next_id": 165,
+          "index_size_mb": 0.6445741653442383,
+          "is_trained": true,
+          "status": "healthy",
+          "search_test_time_ms": 0.0,
+          "search_successful": true,
+          "index_file_exists": true
+        },
+        "error_message": null
+      },
+      {
+        "name": "Embedding Service (Cohere)",
+        "status": "healthy",
+        "response_time_ms": 150.51984786987305,
+        "last_check": "2025-06-07T09:51:02.377813",
+        "details": {
+          "provider": "cohere",
+          "model": "embed-english-v3.0",
+          "expected_dimension": 1024,
+          "actual_dimension": 1024,
+          "test_embedding_sample": [
+            0.0413208,
+            0.0317688,
+            -0.042999268,
+            -0.056915283,
+            0.0024108887
+          ],
+          "embedding_successful": true
+        },
+        "error_message": null
+      },
+      {
+        "name": "LLM Service (Groq)",
+        "status": "healthy",
+        "response_time_ms": 77.56614685058594,
+        "last_check": "2025-06-07T09:51:02.455379",
+        "details": {
+          "provider": "groq",
+          "model": "meta-llama/llama-4-maverick-17b-128e-instruct",
+          "test_response": "Health check successful",
+          "response_length": 23,
+          "response_valid": true,
+          "api_key_configured": true
+        },
+        "error_message": null
+      },
+      {
+        "name": "Dependency Container",
+        "status": "healthy",
+        "response_time_ms": 0.0,
+        "last_check": "2025-06-07T09:51:02.455379",
+        "details": {
+          "registered_services": [
+            "json_store",
+            "query_engine",
+            "embedder",
+            "llm_client",
+            "log_store",
+            "config_manager",
+            "ingestion_engine",
+            "faiss_store",
+            "metadata_store",
+            "chunker"
+          ],
+          "expected_services": [
+            "config_manager",
+            "json_store",
+            "metadata_store",
+            "log_store",
+            "faiss_store",
+            "embedder",
+            "chunker",
+            "llm_client",
+            "query_engine",
+            "ingestion_engine"
+          ],
+          "missing_services": [],
+          "service_creation_test": true,
+          "total_services": 10
+        },
+        "error_message": null
+      },
+      {
+        "name": "Ingestion Engine",
+        "status": "healthy",
+        "response_time_ms": 74.27167892456055,
+        "last_check": "2025-06-07T09:51:02.529651",
+        "details": {
+          "ingestion_test": true,
+          "chunks_created": 1,
+          "test_result": {
+            "status": "success",
+            "file_id": "db0746bd-9c66-4742-965e-867c618e48e3",
+            "file_path": "data\\health_check_test.txt",
+            "chunks_created": 1,
+            "vectors_stored": 1
+          }
+        },
+        "error_message": null
+      },
+      {
+        "name": "Query Engine",
+        "status": "warning",
+        "response_time_ms": 0.0,
+        "last_check": "2025-06-07T09:51:02.529651",
+        "details": {
+          "query_test": false,
+          "error": "'QueryEngine' object has no attribute 'query'"
+        },
+        "error_message": "Query test failed: 'QueryEngine' object has no attribute 'query'"
+      },
+      {
+        "name": "System Resources",
+        "status": "healthy",
+        "response_time_ms": 1005.47194480896,
+        "last_check": "2025-06-07T09:51:03.535123",
+        "details": {
+          "cpu_percent": 0.8,
+          "memory_percent": 70.3,
+          "memory_total_gb": 16.0,
+          "memory_used_gb": 11.24,
+          "memory_available_gb": 4.76,
+          "disk_percent": 16.7,
+          "disk_total_gb": 99.98,
+          "disk_used_gb": 16.71,
+          "disk_free_gb": 83.27,
+          "cpu_count": 2,
+          "boot_time": "2025-06-07T05:26:32.383938"
+        },
+        "error_message": null
+      }
+    ],
+    "performance_metrics": {
+      "system_cpu_percent": 0.0,
+      "system_memory_percent": 70.3,
+      "system_disk_percent": 16.7,
+      "total_vectors": 166,
+      "uptime_seconds": 911,
+      "uptime_hours": 0.3,
+      "api_key_groq_configured": true,
+      "api_key_cohere_configured": true
+    },
+    "alerts": [
+      "Critical issues detected in: API Server"
+    ]
+  },
+  "openai_analysis": {
+    "error": "Error code: 401 - {'error': {'message': 'Incorrect API key provided: your_ope************here. You can find your API key at https://platform.openai.com/account/api-keys.', 'type': 'invalid_request_error', 'param': None, 'code': 'invalid_api_key'}}"
+  },
+  "recommendations": [
+    "Performance optimization needed: 7 tests took >5 seconds"
+  ],
+  "overall_score": 97.1,
+  "timestamp": "2025-06-07T09:51:04.361730"
+}

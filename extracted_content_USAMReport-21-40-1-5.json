@@ -1,0 +1,51 @@
+{
+  "source_file": "C:\\Users\\jaideepvm\\Downloads\\USAMReport-21-40-1-5.pdf",
+  "extraction_method": "azure_computer_vision",
+  "total_pages": 5,
+  "total_characters": 1620,
+  "total_words": 309,
+  "successful_pages": 5,
+  "extraction_timestamp": "2025-06-16 13:03:39",
+  "pages": [
+    {
+      "page_number": 1,
+      "text": "ZONES®\nPEPSICO\nBuilding C - Sales & Delivery Offices 1st Floor\nVoice + Data | dBm\nPRE- DEPLOYMENT\nSIGNAL MAP\n5.0 GHz Signal (RSSI) -65 dBm threshold\n-7170\n-65\n-60\n-55\n-50\n-45 -40\n-35\n-30\nToC\nNotes:\nThe small gray area on the right is a stairwell and hallway outside of Men/Women locker rooms.\nIDF CI\n05\n06\nO\n04\nX537 4\n1529\nO\n03\n02\nWomen\nMer\nZ\nKS44\nV1.2\n@2019 ZONES, INC.\n9/11/2019\nPROPRIETARY & CONFIDENTIAL\nPAGE | 21",
+      "char_count": 417,
+      "word_count": 82,
+      "confidence": 0.9038902439024387,
+      "extraction_method": "azure_computer_vision"
+    },
+    {
+      "page_number": 2,
+      "text": "ZONES®\nPEPSICO\nBuilding C - Sales & Delivery Offices 1st Floor\nVoice + Data | dBm\nPRE - DEPLOYMENT\nSIGNAL MAP\n2.4 GHz Signal (RSSI) -65 dBm threshold\n-7170\n-65\n-60\n-55\n-50\n-45\n-40\n-35\n-30\nToC\nNotes:\n(12\nIDF CI\n05\n106\nX775\n04\n2626\nWomen\nO\n03\n02\nWomen\nX544\nV1.2\n@2019 ZONES, INC.\n9/11/2019\nPROPRIETARY & CONFIDENTIAL\nPAGE | 22",
+      "char_count": 324,
+      "word_count": 64,
+      "confidence": 0.8859374999999996,
+      "extraction_method": "azure_computer_vision"
+    },
+    {
+      "page_number": 3,
+      "text": "ZONES®\nPEPSICO\nSITE PLAN\nBuilding C - Sales & Delivery Offices 2nd Floor\nToC\nSales &\nDelivery\nZ\nV1.2\n@2019 ZONES, INC.\n9/11/2019\nPROPRIETARY & CONFIDENTIAL\nPAGE 1 23",
+      "char_count": 165,
+      "word_count": 29,
+      "confidence": 0.9276551724137931,
+      "extraction_method": "azure_computer_vision"
+    },
+    {
+      "page_number": 4,
+      "text": "ZONES®\nPEPSICO\nAP MODEL\nAP/ANTENNA TYPE\nMDF/IDF\nBUILDING C - SALES & DELIVERY OFFICES 2ND FLOOR\nCisco 38021\nInternal\nExt. Sector\nMDF\nAP PLACEMENT\nCisco 3802E\nExt. Patch\nCisco 1562E\nExt. Omni\nIDF\n1506\n1796\n1731\n¥575\n19627\n07\nT\n¥760\n9671\nFH\n1775\nllel\n×623\n09\nX645\nK700\nX763\n08\nPAX\nX764\nX754\nX71\nZ\n1730\n1293\nWomen\nMen\nX573\n1767\nV1.2\n@2019 ZONES, INC.\n9/11/2019\nPROPRIETARY & CONFIDENTIAL\nPAGE | 24",
+      "char_count": 394,
+      "word_count": 73,
+      "confidence": 0.8273561643835613,
+      "extraction_method": "azure_computer_vision"
+    },
+    {
+      "page_number": 5,
+      "text": "ZONES®\nPEPSICO\nBuilding C - Sales & Delivery Offices 2nd Floor\nVoice + Data | dBm\nPRE- DEPLOYMENT\n£\nSIGNAL MAP\n5.0 GHz Signal (RSSI) -65 dBm threshold\n-7170\n-65\n-60\n-55\n-50\n-45\n-40\n-35\n-30\nToC\nNotes:\n1x506\n1795\nX527\n¥776\n09\nX754\n08\n718\nWamer\nMen\nX7E7\nV1.2\n@2019 ZONES, INC.\n9/11/2019\nPROPRIETARY & CONFIDENTIAL\nPAGE 1 25",
+      "char_count": 320,
+      "word_count": 61,
+      "confidence": 0.8640327868852458,
+      "extraction_method": "azure_computer_vision"
+    }
+  ]
+}

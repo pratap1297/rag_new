@@ -1,0 +1,56 @@
+# ServiceNow Configuration with Scheduler
+# Copy this file to .env and fill in your actual values
+
+# Your ServiceNow instance URL (without https://)
+# Example: dev12345.service-now.com
+SERVICENOW_INSTANCE=your-instance.service-now.com
+
+# ServiceNow username
+SERVICENOW_USERNAME=your_username
+
+# ServiceNow password
+SERVICENOW_PASSWORD=your_password
+
+# Optional: API version (defaults to latest)
+# SERVICENOW_API_VERSION=v1
+
+# Scheduler Configuration
+# How often to fetch incidents (in minutes)
+SERVICENOW_FETCH_INTERVAL=15
+
+# Batch size for fetching incidents
+SERVICENOW_BATCH_SIZE=100
+
+# Maximum incidents to fetch per run
+SERVICENOW_MAX_INCIDENTS=1000
+
+# Priority filter (comma-separated: 1=Critical, 2=High, 3=Moderate, 4=Low, 5=Planning)
+SERVICENOW_PRIORITY_FILTER=1,2,3
+
+# State filter (comma-separated: 1=New, 2=In Progress, 3=On Hold, 6=Resolved, 7=Closed)
+SERVICENOW_STATE_FILTER=1,2,3
+
+# How many days back to fetch incidents
+SERVICENOW_DAYS_BACK=7
+
+# Enable caching of incidents
+SERVICENOW_ENABLE_CACHING=true
+
+# Cache TTL in hours
+SERVICENOW_CACHE_TTL=1
+
+# Enable change detection
+SERVICENOW_CHANGE_DETECTION=true
+
+# Category filters (comma-separated, leave empty for all)
+SERVICENOW_CATEGORIES=Network,Infrastructure
+
+# Assigned group filters (comma-separated, leave empty for all)
+SERVICENOW_ASSIGNED_GROUPS=
+
+# Backend Configuration
+# URL of the Router Rescue AI backend
+BACKEND_URL=http://localhost:8000
+
+# Logging level
+LOG_LEVEL=INFO 

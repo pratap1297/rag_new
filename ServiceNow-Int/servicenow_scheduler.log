@@ -1,0 +1,8 @@
+2025-06-05 08:37:34,100 - __main__ - INFO - ServiceNow Scheduler initialized
+2025-06-05 08:37:34,100 - __main__ - INFO - Added incident callback: process_network_incidents
+2025-06-05 08:37:34,100 - __main__ - INFO - Added incident callback: process_critical_incidents
+2025-06-05 08:37:34,101 - __main__ - INFO - Starting scheduler with 15 minute intervals
+2025-06-05 08:37:34,101 - __main__ - INFO - Starting incident fetch...
+2025-06-05 08:37:34,596 - __main__ - INFO - Fetching incidents with filters: {'priority': ['1', '2', '3'], 'state': ['1', '2', '3'], 'sys_updated_on': '>=2025-05-29 08:37:34', 'category': ['Network', 'Infrastructure']}
+2025-06-05 08:37:34,597 - __main__ - ERROR - Error fetching incidents: 'ServiceNowConnector' object has no attribute 'get_all_incidents'
+2025-06-05 08:37:34,892 - __main__ - INFO - Scheduler started successfully

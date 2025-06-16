@@ -1,0 +1,56 @@
+2025-06-07 06:26:11,220 - root - INFO - Starting RAG System in debug mode
+2025-06-07 06:26:11,554 - faiss.loader - INFO - Loading faiss with AVX512 support.
+2025-06-07 06:26:11,555 - faiss.loader - INFO - Could not load library with AVX512 support due to:
+ModuleNotFoundError("No module named 'faiss.swigfaiss_avx512'")
+2025-06-07 06:26:11,555 - faiss.loader - INFO - Loading faiss with AVX2 support.
+2025-06-07 06:26:11,571 - faiss.loader - INFO - Successfully loaded faiss with AVX2 support.
+2025-06-07 06:26:11,575 - faiss - INFO - Failed to load GPU Faiss: name 'GpuIndexIVFFlat' is not defined. Will not load constructor refs for GPU indexes. This is only an error if you're trying to use GPU Faiss.
+2025-06-07 06:26:11,862 - root - ERROR - Fatal error: create_minimal_container.<locals>.<lambda>() takes 0 positional arguments but 1 was given
+2025-06-07 06:29:24,750 - root - INFO - Starting RAG System in debug mode
+2025-06-07 06:29:25,084 - faiss.loader - INFO - Loading faiss with AVX512 support.
+2025-06-07 06:29:25,084 - faiss.loader - INFO - Could not load library with AVX512 support due to:
+ModuleNotFoundError("No module named 'faiss.swigfaiss_avx512'")
+2025-06-07 06:29:25,084 - faiss.loader - INFO - Loading faiss with AVX2 support.
+2025-06-07 06:29:25,100 - faiss.loader - INFO - Successfully loaded faiss with AVX2 support.
+2025-06-07 06:29:25,104 - faiss - INFO - Failed to load GPU Faiss: name 'GpuIndexIVFFlat' is not defined. Will not load constructor refs for GPU indexes. This is only an error if you're trying to use GPU Faiss.
+2025-06-07 06:29:31,837 - root - INFO - All required dependencies are available
+2025-06-07 06:29:31,839 - root - INFO - RAG System initialization started
+2025-06-07 06:29:31,842 - root - INFO - Created data directories: ['data', 'data/metadata', 'data/metadata/config', 'data/vectors', 'data/uploads', 'data/logs', 'data/backups', 'logs']
+2025-06-07 06:29:31,843 - root - INFO - Validating system requirements...
+2025-06-07 06:29:31,845 - root - INFO - System requirements validation completed
+2025-06-07 06:29:31,847 - root - INFO - Error tracking initialized
+2025-06-07 06:29:31,849 - root - INFO - Initializing core components...
+2025-06-07 06:29:31,852 - root - INFO - Loaded existing FAISS index with 3 vectors
+2025-06-07 06:29:31,852 - root - INFO - FAISS store initialized with dimension 1024
+2025-06-07 06:29:32,471 - root - INFO - Loaded Cohere client with model: embed-english-v3.0
+2025-06-07 06:29:32,659 - httpx - INFO - HTTP Request: POST https://api.cohere.com/v1/embed "HTTP/1.1 200 OK"
+2025-06-07 06:29:32,664 - root - INFO - Cohere embedding dimension: 1024
+2025-06-07 06:29:32,665 - root - INFO - Embedder initialized with provider: cohere
+2025-06-07 06:29:32,909 - root - INFO - LLM client initialized: groq
+2025-06-07 06:29:32,909 - root - INFO - LLM client initialized: groq
+2025-06-07 06:29:32,936 - root - INFO - System Configuration: {'environment': 'development', 'debug_mode': True, 'data_directory': 'data', 'embedding_model': 'all-MiniLM-L6-v2', 'llm_provider': 'groq', 'llm_model': 'llama-3.1-70b-versatile', 'api_host': '0.0.0.0', 'api_port': 8000, 'registered_services': ['llm_client', 'metadata_store', 'json_store', 'config_manager', 'embedder', 'chunker', 'ingestion_engine', 'log_store', 'faiss_store', 'query_engine']}
+2025-06-07 06:29:32,940 - root - INFO - FastAPI application created
+2025-06-07 07:44:59,146 - root - INFO - Starting RAG System in debug mode
+2025-06-07 07:44:59,440 - faiss.loader - INFO - Loading faiss with AVX512 support.
+2025-06-07 07:44:59,441 - faiss.loader - INFO - Could not load library with AVX512 support due to:
+ModuleNotFoundError("No module named 'faiss.swigfaiss_avx512'")
+2025-06-07 07:44:59,441 - faiss.loader - INFO - Loading faiss with AVX2 support.
+2025-06-07 07:44:59,459 - faiss.loader - INFO - Successfully loaded faiss with AVX2 support.
+2025-06-07 07:44:59,464 - faiss - INFO - Failed to load GPU Faiss: name 'GpuIndexIVFFlat' is not defined. Will not load constructor refs for GPU indexes. This is only an error if you're trying to use GPU Faiss.
+2025-06-07 07:45:05,193 - root - INFO - All required dependencies are available
+2025-06-07 07:45:05,194 - root - INFO - RAG System initialization started
+2025-06-07 07:45:05,197 - root - INFO - Created data directories: ['data', 'data/metadata', 'data/metadata/config', 'data/vectors', 'data/uploads', 'data/logs', 'data/backups', 'logs']
+2025-06-07 07:45:05,198 - root - INFO - Validating system requirements...
+2025-06-07 07:45:05,203 - root - INFO - System requirements validation completed
+2025-06-07 07:45:05,205 - root - INFO - Error tracking initialized
+2025-06-07 07:45:05,207 - root - INFO - Initializing core components...
+2025-06-07 07:45:05,209 - root - INFO - Loaded existing FAISS index with 27 vectors
+2025-06-07 07:45:05,210 - root - INFO - FAISS store initialized with dimension 1024
+2025-06-07 07:45:05,832 - root - INFO - Loaded Cohere client with model: embed-english-v3.0
+2025-06-07 07:45:05,934 - httpx - INFO - HTTP Request: POST https://api.cohere.com/v1/embed "HTTP/1.1 200 OK"
+2025-06-07 07:45:05,938 - root - INFO - Cohere embedding dimension: 1024
+2025-06-07 07:45:05,939 - root - INFO - Embedder initialized with provider: cohere
+2025-06-07 07:45:06,174 - root - INFO - LLM client initialized: groq (timeout: 30s)
+2025-06-07 07:45:06,174 - root - INFO - LLM client initialized: groq
+2025-06-07 07:45:06,179 - root - INFO - System Configuration: {'environment': 'development', 'debug_mode': True, 'data_directory': 'data', 'embedding_model': 'embed-english-v3.0', 'llm_provider': 'groq', 'llm_model': 'meta-llama/llama-4-maverick-17b-128e-instruct', 'api_host': '0.0.0.0', 'api_port': 8000, 'registered_services': ['json_store', 'faiss_store', 'llm_client', 'ingestion_engine', 'embedder', 'log_store', 'metadata_store', 'config_manager', 'query_engine', 'chunker']}
+2025-06-07 07:45:06,184 - root - INFO - FastAPI application created

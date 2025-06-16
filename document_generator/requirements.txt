@@ -1,0 +1,16 @@
+# RAG Test Data Generator Requirements
+
+# Core data manipulation
+pandas
+numpy
+
+# PDF generation
+reportlab
+matplotlib
+
+# Excel file handling  
+openpyxl
+
+# Additional utilities
+python-dateutil
+Pillow
