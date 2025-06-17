@@ -6,7 +6,10 @@ import logging
 from typing import Dict, Any, Optional
 from datetime import datetime, timedelta
 
-from .conversation_state import ConversationState, MessageType, ConversationPhase
+from .conversation_state import (
+    ConversationState, MessageType, ConversationPhase,
+    create_conversation_state, add_message_to_state, get_conversation_history
+)
 from .conversation_graph import ConversationGraph
 
 class ConversationManager:
@@ -28,19 +31,21 @@ class ConversationManager:
     def start_conversation(self, session_id: Optional[str] = None) -> ConversationState:
         """Start a new conversation"""
         
-        state = ConversationState()
-        if session_id:
-            state.session_id = session_id
+        # Create new conversation state
+        state = create_conversation_state(session_id)
         
         # Store in active conversations
-        self.active_conversations[state.session_id] = state
+        self.active_conversations[state['session_id']] = state
         
         # Directly add initial greeting instead of processing empty message
         greeting = "Hello! I'm your AI assistant. I can help you find information, answer questions, and have a conversation about various topics. What would you like to know?"
-        state.add_message(MessageType.ASSISTANT, greeting)
-        state.current_phase = ConversationPhase.UNDERSTANDING
+        state = add_message_to_state(state, MessageType.ASSISTANT, greeting)
+        state['current_phase'] = ConversationPhase.UNDERSTANDING
         
-        self.logger.info(f"Started new conversation: {state.conversation_id}")
+        # Update stored state
+        self.active_conversations[state['session_id']] = state
+        
+        self.logger.info(f"Started new conversation: {state['conversation_id']}")
         return state
     
     def process_user_message(self, session_id: str, message: str) -> Dict[str, Any]:
@@ -80,23 +85,23 @@ class ConversationManager:
         if not state:
             return {'messages': [], 'session_id': session_id}
         
-        messages = state.get_conversation_history(max_messages)
+        messages = get_conversation_history(state, max_messages)
         
         return {
             'messages': [
                 {
-                    'type': msg.type.value,
-                    'content': msg.content,
-                    'timestamp': msg.timestamp,
-                    'metadata': msg.metadata
+                    'type': msg['type'].value,
+                    'content': msg['content'],
+                    'timestamp': msg['timestamp'],
+                    'metadata': msg['metadata']
                 }
                 for msg in messages
             ],
             'session_id': session_id,
-            'conversation_id': state.conversation_id,
-            'turn_count': state.turn_count,
-            'current_phase': state.current_phase.value,
-            'topics_discussed': state.topics_discussed
+            'conversation_id': state['conversation_id'],
+            'turn_count': state['turn_count'],
+            'current_phase': state['current_phase'].value,
+            'topics_discussed': state['topics_discussed']
         }
     
     def end_conversation(self, session_id: str) -> Dict[str, Any]:
@@ -107,7 +112,7 @@ class ConversationManager:
             
             # Add farewell message
             farewell = "Thank you for the conversation! Feel free to start a new chat anytime."
-            state.add_message(MessageType.ASSISTANT, farewell)
+            state = add_message_to_state(state, MessageType.ASSISTANT, farewell)
             
             # Generate conversation summary
             summary = self._generate_conversation_summary(state)
@@ -121,7 +126,7 @@ class ConversationManager:
                 'message': 'Conversation ended',
                 'summary': summary,
                 'session_id': session_id,
-                'total_turns': state.turn_count
+                'total_turns': state['turn_count']
             }
         
         return {'message': 'No active conversation found', 'session_id': session_id}
@@ -133,7 +138,7 @@ class ConversationManager:
             state = self.active_conversations[session_id]
             
             # Check if conversation has expired
-            last_activity = datetime.fromisoformat(state.last_activity)
+            last_activity = datetime.fromisoformat(state['last_activity'])
             if datetime.now() - last_activity > timedelta(minutes=self.session_timeout_minutes):
                 # Conversation expired, create new one
                 del self.active_conversations[session_id]
@@ -148,38 +153,38 @@ class ConversationManager:
         """Format conversation state into response"""
         
         # Get the latest assistant message
-        assistant_messages = [msg for msg in state.messages if msg.type == MessageType.ASSISTANT]
-        latest_response = assistant_messages[-1].content if assistant_messages else ""
+        assistant_messages = [msg for msg in state['messages'] if msg['type'] == MessageType.ASSISTANT]
+        latest_response = assistant_messages[-1]['content'] if assistant_messages else ""
         
         response = {
             'response': latest_response,
-            'session_id': state.session_id,
-            'conversation_id': state.conversation_id,
-            'turn_count': state.turn_count,
-            'current_phase': state.current_phase.value,
-            'confidence_score': state.response_confidence,
+            'session_id': state['session_id'],
+            'conversation_id': state['conversation_id'],
+            'turn_count': state['turn_count'],
+            'current_phase': state['current_phase'].value,
+            'confidence_score': state['response_confidence'],
             'timestamp': datetime.now().isoformat()
         }
         
         # Add optional fields if available
-        if state.suggested_questions:
-            response['suggested_questions'] = state.suggested_questions
+        if state['suggested_questions']:
+            response['suggested_questions'] = state['suggested_questions']
         
-        if state.related_topics:
-            response['related_topics'] = state.related_topics
+        if state['related_topics']:
+            response['related_topics'] = state['related_topics']
         
-        if state.search_results:
+        if state['search_results']:
             response['sources'] = [
                 {
-                    'content': result.content[:200] + "..." if len(result.content) > 200 else result.content,
-                    'score': result.score,
-                    'source': result.source
+                    'content': result['content'][:200] + "..." if len(result['content']) > 200 else result['content'],
+                    'score': result['score'],
+                    'source': result['source']
                 }
-                for result in state.search_results[:3]
+                for result in state['search_results'][:3]
             ]
         
-        if state.has_errors:
-            response['errors'] = state.error_messages
+        if state['has_errors']:
+            response['errors'] = state['error_messages']
         
         return response
     
@@ -190,7 +195,7 @@ class ConversationManager:
         expired_sessions = []
         
         for session_id, state in self.active_conversations.items():
-            last_activity = datetime.fromisoformat(state.last_activity)
+            last_activity = datetime.fromisoformat(state['last_activity'])
             if current_time - last_activity > timedelta(minutes=self.session_timeout_minutes):
                 expired_sessions.append(session_id)
         
@@ -201,11 +206,11 @@ class ConversationManager:
     def _generate_conversation_summary(self, state: ConversationState) -> str:
         """Generate a summary of the conversation"""
         
-        if not state.messages:
+        if not state['messages']:
             return "No conversation content"
         
-        user_messages = [msg.content for msg in state.messages if msg.type == MessageType.USER]
-        topics = state.topics_discussed
+        user_messages = [msg['content'] for msg in state['messages'] if msg['type'] == MessageType.USER]
+        topics = state['topics_discussed']
         
         summary_parts = []
         
@@ -215,7 +220,7 @@ class ConversationManager:
         if user_messages:
             summary_parts.append(f"Total user messages: {len(user_messages)}")
         
-        summary_parts.append(f"Conversation turns: {state.turn_count}")
+        summary_parts.append(f"Conversation turns: {state['turn_count']}")
         
         return "; ".join(summary_parts)
     
@@ -227,10 +232,10 @@ class ConversationManager:
             'sessions': [
                 {
                     'session_id': session_id,
-                    'conversation_id': state.conversation_id,
-                    'turn_count': state.turn_count,
-                    'last_activity': state.last_activity,
-                    'current_phase': state.current_phase.value
+                    'conversation_id': state['conversation_id'],
+                    'turn_count': state['turn_count'],
+                    'last_activity': state['last_activity'],
+                    'current_phase': state['current_phase'].value
                 }
                 for session_id, state in self.active_conversations.items()
             ]

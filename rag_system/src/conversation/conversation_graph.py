@@ -7,7 +7,10 @@ from typing import Dict, Any, Literal
 from langgraph.graph import StateGraph, END
 from langgraph.prebuilt import ToolNode
 
-from .conversation_state import ConversationState, ConversationPhase, MessageType
+from .conversation_state import (
+    ConversationState, ConversationPhase, MessageType,
+    add_message_to_state
+)
 from .conversation_nodes import ConversationNodes
 
 class ConversationGraph:
@@ -86,8 +89,8 @@ class ConversationGraph:
         """Route after understanding user intent"""
         
         try:
-            user_intent = getattr(state, 'user_intent', 'general')
-            turn_count = getattr(state, 'turn_count', 0)
+            user_intent = state.get('user_intent', 'general')
+            turn_count = state.get('turn_count', 0)
             
             if user_intent == "goodbye":
                 return "end"
@@ -106,8 +109,8 @@ class ConversationGraph:
         """Route after searching knowledge base"""
         
         try:
-            requires_clarification = getattr(state, 'requires_clarification', False)
-            search_results = getattr(state, 'search_results', [])
+            requires_clarification = state.get('requires_clarification', False)
+            search_results = state.get('search_results', [])
             
             # Only go to clarify if explicitly requested, not just because no results
             if requires_clarification:
@@ -123,13 +126,12 @@ class ConversationGraph:
         """Route to determine if conversation should end"""
         
         try:
-            current_phase = getattr(state, 'current_phase', ConversationPhase.UNDERSTANDING)
-            user_intent = getattr(state, 'user_intent', None)
+            current_phase = state.get('current_phase', ConversationPhase.UNDERSTANDING)
+            user_intent = state.get('user_intent', None)
             
             # Only end if explicitly in ending phase or goodbye intent
             if (current_phase == ConversationPhase.ENDING or 
-                user_intent == "goodbye" or
-                (hasattr(state, 'should_end_conversation') and state.should_end_conversation())):
+                user_intent == "goodbye"):
                 return "end"
             else:
                 return "continue"
@@ -144,7 +146,7 @@ class ConversationGraph:
         try:
             # Add user message to state if it's not empty (for initial greeting)
             if user_message.strip():
-                state.add_message(MessageType.USER, user_message)
+                state = add_message_to_state(state, MessageType.USER, user_message)
             
             # Run the graph directly with ConversationState
             result = self.graph.invoke(
@@ -152,7 +154,7 @@ class ConversationGraph:
                 config={"recursion_limit": 50}
             )
             
-            self.logger.info(f"Conversation processed successfully, phase: {result.current_phase}")
+            self.logger.info(f"Conversation processed successfully, phase: {result['current_phase']}")
             return result
             
         except Exception as e:
@@ -160,8 +162,8 @@ class ConversationGraph:
             
             # Handle error gracefully
             error_response = "I apologize, but I encountered an error processing your message. Please try again."
-            state.add_message(MessageType.ASSISTANT, error_response)
-            state.has_errors = True
-            state.error_messages.append(str(e))
+            error_state = add_message_to_state(state, MessageType.ASSISTANT, error_response)
+            error_state['has_errors'] = True
+            error_state['error_messages'] = state.get('error_messages', []) + [str(e)]
             
-            return state 
+            return error_state 
