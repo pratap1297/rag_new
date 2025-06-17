@@ -169,10 +169,8 @@ class ConversationManager:
         if state.related_topics:
             response['related_topics'] = state.related_topics
         
-        # Include sources from search results or original search result
-        sources_to_include = []
         if state.search_results:
-            sources_to_include = [
+            response['sources'] = [
                 {
                     'content': result.content[:200] + "..." if len(result.content) > 200 else result.content,
                     'score': result.score,
@@ -180,21 +178,6 @@ class ConversationManager:
                 }
                 for result in state.search_results[:3]
             ]
-        elif hasattr(state, 'original_search_result') and state.original_search_result:
-            # Use sources from original search result even if they were filtered out
-            original_sources = state.original_search_result.get('sources', [])
-            if original_sources:
-                sources_to_include = [
-                    {
-                        'content': source.get('text', '')[:200] + "..." if len(source.get('text', '')) > 200 else source.get('text', ''),
-                        'score': source.get('similarity_score', source.get('score', 0)),
-                        'source': source.get('metadata', {}).get('filename', 'unknown')
-                    }
-                    for source in original_sources[:3]
-                ]
-        
-        if sources_to_include:
-            response['sources'] = sources_to_include
         
         if state.has_errors:
             response['errors'] = state.error_messages
