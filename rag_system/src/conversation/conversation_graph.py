@@ -7,7 +7,7 @@ from typing import Dict, Any, Literal
 from langgraph.graph import StateGraph, END
 from langgraph.prebuilt import ToolNode
 
-from .conversation_state import ConversationState, ConversationPhase
+from .conversation_state import ConversationState, ConversationPhase, MessageType
 from .conversation_nodes import ConversationNodes
 
 class ConversationGraph:
@@ -144,7 +144,6 @@ class ConversationGraph:
         try:
             # Add user message to state if it's not empty (for initial greeting)
             if user_message.strip():
-                from .conversation_state import MessageType
                 state.add_message(MessageType.USER, user_message)
             
             # Run the graph directly with ConversationState
@@ -160,7 +159,6 @@ class ConversationGraph:
             self.logger.error(f"Error processing conversation: {e}")
             
             # Handle error gracefully
-            from .conversation_state import MessageType
             error_response = "I apologize, but I encountered an error processing your message. Please try again."
             state.add_message(MessageType.ASSISTANT, error_response)
             state.has_errors = True

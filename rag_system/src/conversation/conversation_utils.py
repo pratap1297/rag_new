@@ -7,6 +7,8 @@ from typing import Dict, List, Any
 from collections import Counter
 from datetime import datetime, timedelta
 
+from .conversation_state import MessageType
+
 class ConversationUtils:
     """Utility functions for conversation processing"""
     
@@ -33,7 +35,6 @@ class ConversationUtils:
     @staticmethod
     def calculate_conversation_quality(state) -> float:
         """Calculate conversation quality score"""
-        from .conversation_state import MessageType
         
         if not state.messages:
             return 0.0
@@ -80,7 +81,6 @@ class ConversationUtils:
     @staticmethod
     def format_conversation_export(state) -> Dict[str, Any]:
         """Format conversation for export/analysis"""
-        from .conversation_state import MessageType
         
         return {
             'conversation_id': state.conversation_id,

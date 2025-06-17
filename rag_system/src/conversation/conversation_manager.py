@@ -6,7 +6,7 @@ import logging
 from typing import Dict, Any, Optional
 from datetime import datetime, timedelta
 
-from .conversation_state import ConversationState, MessageType
+from .conversation_state import ConversationState, MessageType, ConversationPhase
 from .conversation_graph import ConversationGraph
 
 class ConversationManager:
@@ -36,7 +36,6 @@ class ConversationManager:
         self.active_conversations[state.session_id] = state
         
         # Directly add initial greeting instead of processing empty message
-        from .conversation_state import MessageType, ConversationPhase
         greeting = "Hello! I'm your AI assistant. I can help you find information, answer questions, and have a conversation about various topics. What would you like to know?"
         state.add_message(MessageType.ASSISTANT, greeting)
         state.current_phase = ConversationPhase.UNDERSTANDING
