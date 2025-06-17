@@ -1482,6 +1482,199 @@ class FixedRAGUI:
             print(f"Error getting document paths from overview: {e}")
             return ["Error loading documents"]
 
+    def get_monitored_folders(self) -> tuple[str, list]:
+        """Get list of currently monitored folders"""
+        try:
+            response = requests.get(f"{self.api_url}/folder-monitor/folders", timeout=10)
+            if response.status_code == 200:
+                data = response.json()
+                if data.get('success'):
+                    folders = data.get('folders', [])
+                    if folders:
+                        folder_list = "\n".join([f"📁 {folder}" for folder in folders])
+                        return f"## 📁 Currently Monitored Folders ({len(folders)})\n\n{folder_list}", folders
+                    else:
+                        return "## 📁 Currently Monitored Folders (0)\n\n*No folders are currently being monitored*", []
+                else:
+                    return f"❌ Error: {data.get('error', 'Unknown error')}", []
+            else:
+                return f"❌ HTTP {response.status_code}: {response.text}", []
+        except Exception as e:
+            return f"❌ Failed to get monitored folders: {str(e)}", []
+
+    def remove_folder_monitoring(self, folder_path: str) -> str:
+        """Remove a specific folder from monitoring"""
+        if not folder_path or not folder_path.strip():
+            return "❌ Please select a folder to remove"
+        
+        folder_path = folder_path.strip()
+        
+        try:
+            response = requests.post(
+                f"{self.api_url}/folder-monitor/remove",
+                json={"folder_path": folder_path},
+                timeout=10
+            )
+            
+            if response.status_code == 200:
+                data = response.json()
+                if data.get('success'):
+                    files_removed = data.get('files_removed', 0)
+                    return f"✅ Successfully removed folder from monitoring: {folder_path}\n📄 Files removed from tracking: {files_removed}"
+                else:
+                    return f"❌ Failed to remove folder: {data.get('error', 'Unknown error')}"
+            else:
+                return f"❌ HTTP {response.status_code}: {response.text}"
+                
+        except Exception as e:
+            return f"❌ Failed to remove folder from monitoring: {str(e)}"
+    
+    # =================== CONVERSATION METHODS ===================
+    
+    def start_new_conversation(self) -> Tuple[List[Dict[str, str]], str, str]:
+        """Start a new conversation session"""
+        try:
+            response = requests.post(f"{self.api_url}/api/conversation/start", json={})
+            
+            if response.status_code == 200:
+                data = response.json()
+                session_id = data["session_id"]
+                initial_response = data["response"]
+                
+                # Return conversation history, session ID, and status
+                conversation_history = [
+                    {"role": "assistant", "content": initial_response}
+                ]
+                
+                return conversation_history, session_id, "✅ New conversation started!"
+            elif response.status_code == 404:
+                # Conversation API not available
+                error_msg = """🚧 **Conversation Feature Not Available**
+
+The LangGraph conversation system is not currently available. This could be due to:
+
+• **Missing LangGraph dependencies** - Run: `pip install langgraph`
+• **Server configuration issue** - Check server logs
+• **API routes not registered** - Restart the RAG server
+
+**To enable conversations:**
+1. Ensure LangGraph is installed: `pip install langgraph>=0.0.40`
+2. Restart the RAG server: `python main.py`
+3. Check server logs for any errors
+
+**Alternative:** You can still use the regular Query Testing tab for Q&A functionality."""
+                
+                error_history = [{"role": "assistant", "content": error_msg}]
+                return error_history, "", "❌ Conversation API not available (404)"
+            else:
+                error_history = [{"role": "assistant", "content": f"Error starting conversation: HTTP {response.status_code}"}]
+                return error_history, "", f"❌ Failed to start conversation: {response.status_code}"
+                
+        except requests.exceptions.RequestException as e:
+            error_history = [{"role": "assistant", "content": f"Connection error: {str(e)}"}]
+            return error_history, "", f"❌ Connection error: {str(e)}"
+        except Exception as e:
+            error_history = [{"role": "assistant", "content": f"Error: {str(e)}"}]
+            return error_history, "", f"❌ Error starting conversation: {str(e)}"
+    
+    def send_conversation_message(self, message: str, session_id: str, history: List[Dict[str, str]]) -> Tuple[str, List[Dict[str, str]], str]:
+        """Send a message in the conversation"""
+        if not message.strip():
+            return "", history, "Please enter a message"
+        
+        if not session_id or session_id == "No session":
+            history.append({"role": "user", "content": message})
+            history.append({"role": "assistant", "content": "Please start a new conversation first"})
+            return "", history, "No active session"
+        
+        try:
+            # Add user message to history
+            history.append({"role": "user", "content": message})
+            
+            # Send to API
+            response = requests.post(
+                f"{self.api_url}/api/conversation/message",
+                json={"message": message, "session_id": session_id}
+            )
+            
+            if response.status_code == 200:
+                data = response.json()
+                assistant_response = data.get('response', 'No response generated')
+                
+                # Add assistant response to history
+                history.append({"role": "assistant", "content": assistant_response})
+                
+                # Format additional info
+                info_parts = []
+                if data.get('turn_count'):
+                    info_parts.append(f"Turn: {data['turn_count']}")
+                if data.get('current_phase'):
+                    info_parts.append(f"Phase: {data['current_phase']}")
+                if data.get('confidence_score'):
+                    info_parts.append(f"Confidence: {data['confidence_score']:.2f}")
+                
+                session_info = " | ".join(info_parts) if info_parts else "Active conversation"
+                
+                return "", history, f"✅ {session_info}"
+            elif response.status_code == 404:
+                error_msg = "🚧 Conversation API not available. Please use the Query Testing tab for Q&A functionality."
+                history.append({"role": "assistant", "content": error_msg})
+                return "", history, "❌ Conversation API not available (404)"
+            else:
+                history.append({"role": "assistant", "content": f"Error: {response.status_code}"})
+                return "", history, f"❌ API Error: {response.status_code}"
+                
+        except requests.exceptions.RequestException as e:
+            history.append({"role": "assistant", "content": f"Connection error: {str(e)}"})
+            return "", history, f"❌ Connection error: {str(e)}"
+        except Exception as e:
+            history.append({"role": "assistant", "content": f"Error: {str(e)}"})
+            return "", history, f"❌ Error: {str(e)}"
+    
+    def end_conversation(self, session_id: str) -> Tuple[List[Dict[str, str]], str, str]:
+        """End the current conversation"""
+        if not session_id or session_id == "No session":
+            return [], "", "No active conversation to end"
+        
+        try:
+            response = requests.post(f"{self.api_url}/api/conversation/end/{session_id}")
+            
+            if response.status_code == 200:
+                data = response.json()
+                summary = data.get('summary', 'Conversation ended')
+                total_turns = data.get('total_turns', 0)
+                
+                end_history = [{
+                    "role": "assistant", 
+                    "content": f"🎯 Conversation ended.\n\nSummary: {summary}\nTotal turns: {total_turns}\n\nThank you for the conversation!"
+                }]
+                
+                return end_history, "", f"✅ Conversation ended - {total_turns} turns"
+            else:
+                return [], session_id, f"❌ Failed to end conversation: {response.status_code}"
+                
+        except requests.exceptions.RequestException as e:
+            return [], session_id, f"❌ Connection error: {str(e)}"
+        except Exception as e:
+            return [], session_id, f"❌ Error ending conversation: {str(e)}"
+    
+    def get_conversation_status(self, session_id: str) -> str:
+        """Get current conversation status"""
+        if not session_id or session_id == "No session":
+            return "No active conversation"
+        
+        try:
+            response = requests.get(f"{self.api_url}/api/conversation/history/{session_id}")
+            
+            if response.status_code == 200:
+                data = response.json()
+                return f"Session: {session_id[:8]}... | Turns: {data.get('turn_count', 0)} | Phase: {data.get('current_phase', 'unknown')}"
+            else:
+                return f"Error getting status: {response.status_code}"
+                
+        except Exception as e:
+            return f"Status unavailable: {str(e)}"
+
 def create_fixed_interface():
     """Create the fixed document lifecycle management interface"""
     
@@ -1845,6 +2038,36 @@ def create_fixed_interface():
                             value="📴 **Monitoring Status:** Inactive"
                         )
                         
+                        gr.Markdown("---")
+                        
+                        gr.Markdown("#### 🗂️ Manage Individual Folders")
+                        
+                        monitored_folders_display = gr.Markdown(
+                            value="*Click 'Refresh Folders' to see monitored folders*",
+                            visible=True
+                        )
+                        
+                        with gr.Row():
+                            refresh_folders_btn = gr.Button("🔄 Refresh Folders", variant="secondary", size="sm")
+                            
+                        folder_selector = gr.Dropdown(
+                            label="Select Folder to Remove",
+                            choices=[],
+                            value=None,
+                            interactive=True,
+                            visible=False
+                        )
+                        
+                        remove_folder_result = gr.Markdown(
+                            value="",
+                            visible=False
+                        )
+                        
+                        with gr.Row():
+                            remove_folder_btn = gr.Button("🗑️ Remove Selected Folder", variant="stop", size="sm", visible=False)
+                        
+                        gr.Markdown("---")
+                        
                         gr.Markdown("#### 📋 Supported File Types")
                         gr.Markdown("""
                         - 📄 **Text files**: .txt, .md
@@ -1860,10 +2083,11 @@ def create_fixed_interface():
                         5. **Query testing** to verify changes
                         
                         #### ⚠️ Important Notes
-                        - Only one folder can be monitored at a time
+                        - Multiple folders can be monitored simultaneously
                         - Files are checked every 60 seconds
                         - Large files may take time to process
-                                                 - Monitor console output for detailed logs
+                        - Use "Manage Individual Folders" to remove specific folders
+                        - Monitor console output for detailed logs
                          """)
             
             # Vector Store Diagnostics Tab
@@ -2119,6 +2343,101 @@ def create_fixed_interface():
                     3. Restart the application
                                         """)
 
+            # Conversation Chat Tab
+            with gr.Tab("💬 Conversation Chat"):
+                gr.Markdown("### 🤖 LangGraph Conversational Chat")
+                gr.Markdown("""
+                **Engage in intelligent conversations with your RAG system:**
+                - 🧠 **Multi-turn conversations** with context retention
+                - 🔍 **Knowledge-based responses** using your document database
+                - 💡 **Follow-up suggestions** and related topics
+                - 📊 **Conversation analytics** and session management
+                """)
+                
+                with gr.Row():
+                    with gr.Column(scale=3):
+                        # Main conversation area
+                        chatbot = gr.Chatbot(
+                            label="Conversation",
+                            height=500,
+                            show_label=True,
+                            container=True,
+                            type="messages"
+                        )
+                        
+                        with gr.Row():
+                            message_input = gr.Textbox(
+                                placeholder="Type your message here... Press Enter to send",
+                                label="Your Message",
+                                lines=2,
+                                scale=4
+                            )
+                            send_button = gr.Button("📤 Send", variant="primary", scale=1)
+                        
+                        with gr.Row():
+                            start_conversation_btn = gr.Button("🆕 Start New Conversation", variant="secondary")
+                            end_conversation_btn = gr.Button("🔚 End Conversation", variant="stop")
+                            refresh_conversation_btn = gr.Button("🔄 Refresh Status", variant="secondary")
+                    
+                    with gr.Column(scale=1):
+                        # Session information
+                        gr.Markdown("#### ℹ️ Session Info")
+                        
+                        session_id_display = gr.Textbox(
+                            label="Session ID",
+                            value="No session",
+                            interactive=False,
+                            max_lines=1
+                        )
+                        
+                        conversation_status = gr.Markdown(
+                            label="Conversation Status",
+                            value="No active conversation"
+                        )
+                        
+                        gr.Markdown("---")
+                        
+                        gr.Markdown("#### 💡 How to Use")
+                        gr.Markdown("""
+                        **Getting Started:**
+                        1. Click "🆕 Start New Conversation"
+                        2. Type your message in the text box
+                        3. Press Enter or click "📤 Send"
+                        4. Continue the conversation naturally
+                        5. Click "🔚 End Conversation" when done
+                        
+                        **Features:**
+                        - 🧠 **Context Aware**: Remembers previous messages
+                        - 🔍 **Knowledge Search**: Finds relevant documents
+                        - 💡 **Smart Suggestions**: Offers follow-up questions
+                        - 📊 **Session Tracking**: Monitors conversation flow
+                        
+                        **Tips:**
+                        - Ask specific questions about your documents
+                        - Build on previous responses
+                        - Use natural language
+                        - Try follow-up questions for deeper insights
+                        """)
+                        
+                        gr.Markdown("---")
+                        
+                        gr.Markdown("#### 🔧 Conversation Features")
+                        gr.Markdown("""
+                        **LangGraph Integration:**
+                        - **Intent Detection**: Understands your query type
+                        - **Knowledge Retrieval**: Searches your documents
+                        - **Response Generation**: Creates contextual answers
+                        - **Conversation Flow**: Manages multi-turn dialogue
+                        
+                        **Conversation Phases:**
+                        - 👋 **Greeting**: Initial welcome
+                        - 🤔 **Understanding**: Intent analysis
+                        - 🔍 **Searching**: Knowledge retrieval
+                        - 💬 **Responding**: Answer generation
+                        - ❓ **Clarifying**: Follow-up questions
+                        - 🎯 **Follow-up**: Related suggestions
+                        """)
+
             # Help Tab
             with gr.Tab("❓ Help"):
                 gr.Markdown("""
@@ -2296,6 +2615,13 @@ def create_fixed_interface():
                 4. Add a .txt file to that folder → should auto-upload
                 5. Modify the file → should auto-update
                 6. Delete the file → should auto-delete from vector store
+
+                ### **Test Conversation System**
+                1. Go to "💬 Conversation Chat" tab
+                2. Click "🆕 Start New Conversation"
+                3. Type a message and press Enter or click Send
+                4. Have a multi-turn conversation with context retention
+                5. Click "🔚 End Conversation" when finished
                 7. Check console output for real-time monitoring logs
 
                 ## 💡 Pro Tips
@@ -2511,6 +2837,72 @@ def create_fixed_interface():
             outputs=[monitor_status_display, document_registry_display, delete_doc_path_input]
         )
         
+        # Individual folder management event handlers
+        def refresh_folders_and_display():
+            display_text, folder_list = ui.get_monitored_folders()
+            if folder_list:
+                return (
+                    display_text,
+                    gr.update(choices=folder_list, value=None, visible=True),
+                    gr.update(visible=True),
+                    gr.update(visible=False, value="")
+                )
+            else:
+                return (
+                    display_text,
+                    gr.update(choices=[], value=None, visible=False),
+                    gr.update(visible=False),
+                    gr.update(visible=False, value="")
+                )
+        
+        def remove_folder_and_refresh(selected_folder):
+            if not selected_folder:
+                return (
+                    "❌ Please select a folder to remove",
+                    ui._format_document_registry(),
+                    gr.update(choices=ui.get_document_paths(), value=None),
+                    ui.get_monitoring_status()
+                )
+            
+            # Remove the folder
+            result = ui.remove_folder_monitoring(selected_folder)
+            
+            # Refresh displays
+            registry = ui._format_document_registry()
+            dropdown_choices = ui.get_document_paths()
+            monitoring_status = ui.get_monitoring_status()
+            
+            # Refresh folder list
+            display_text, folder_list = ui.get_monitored_folders()
+            
+            # Ensure dropdown_choices is a proper list of strings
+            if not isinstance(dropdown_choices, list):
+                dropdown_choices = ["(No documents uploaded yet)"]
+            
+            safe_choices = [str(choice) for choice in dropdown_choices if choice is not None]
+            if not safe_choices:
+                safe_choices = ["(No documents uploaded yet)"]
+            
+            return (
+                result,
+                registry,
+                gr.update(choices=safe_choices, value=None),
+                monitoring_status,
+                display_text,
+                gr.update(choices=folder_list, value=None, visible=len(folder_list) > 0)
+            )
+        
+        refresh_folders_btn.click(
+            fn=refresh_folders_and_display,
+            outputs=[monitored_folders_display, folder_selector, remove_folder_btn, remove_folder_result]
+        )
+        
+        remove_folder_btn.click(
+            fn=remove_folder_and_refresh,
+            inputs=[folder_selector],
+            outputs=[remove_folder_result, document_registry_display, delete_doc_path_input, monitor_status_display, monitored_folders_display, folder_selector]
+        )
+        
         # Vector diagnostics event handlers
         def get_stats_and_refresh():
             stats = ui.get_vector_store_stats()
@@ -2640,6 +3032,59 @@ def create_fixed_interface():
             outputs=heartbeat_output
         )
         
+        # Conversation event handlers
+        def start_conversation_and_update():
+            """Start a new conversation and update UI"""
+            history, session_id, status = ui.start_new_conversation()
+            conversation_status_text = ui.get_conversation_status(session_id)
+            return history, session_id, status, conversation_status_text
+        
+        def send_message_and_update(message, session_id, history):
+            """Send message and update conversation"""
+            message_cleared, updated_history, status = ui.send_conversation_message(message, session_id, history)
+            conversation_status_text = ui.get_conversation_status(session_id)
+            return message_cleared, updated_history, status, conversation_status_text
+        
+        def end_conversation_and_update(session_id):
+            """End conversation and update UI"""
+            end_history, cleared_session, status = ui.end_conversation(session_id)
+            return end_history, cleared_session, status, "No active conversation"
+        
+        def refresh_conversation_status(session_id):
+            """Refresh conversation status"""
+            status_text = ui.get_conversation_status(session_id)
+            return status_text
+        
+        # Conversation tab event handlers
+        start_conversation_btn.click(
+            fn=start_conversation_and_update,
+            outputs=[chatbot, session_id_display, conversation_status, conversation_status]
+        )
+        
+        send_button.click(
+            fn=send_message_and_update,
+            inputs=[message_input, session_id_display, chatbot],
+            outputs=[message_input, chatbot, conversation_status, conversation_status]
+        )
+        
+        message_input.submit(
+            fn=send_message_and_update,
+            inputs=[message_input, session_id_display, chatbot],
+            outputs=[message_input, chatbot, conversation_status, conversation_status]
+        )
+        
+        end_conversation_btn.click(
+            fn=end_conversation_and_update,
+            inputs=[session_id_display],
+            outputs=[chatbot, session_id_display, conversation_status, conversation_status]
+        )
+        
+        refresh_conversation_btn.click(
+            fn=refresh_conversation_status,
+            inputs=[session_id_display],
+            outputs=[conversation_status]
+        )
+
         # Initialize connection status on load
         interface.load(
             fn=ui.check_api_connection,
@@ -2697,7 +3142,12 @@ def main():
   ✅ Clear status messages
   ✅ Upload counter tracking
   ✅ Better user experience
-🎯 Test the improved Upload → Update → Delete → Query workflow!
+💬 NEW: LangGraph Conversational Chat
+  ✅ Multi-turn conversations with context
+  ✅ Knowledge-based responses
+  ✅ Session management
+  ✅ Intent detection and routing
+🎯 Test the improved Upload → Update → Delete → Query → Chat workflow!
    No more confusion about upload vs update!
 Ready to launch! Press Ctrl+C to stop the UI
 ==================================================

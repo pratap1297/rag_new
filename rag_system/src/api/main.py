@@ -9,12 +9,14 @@ from typing import Dict, Any, Optional, List
 import logging
 import asyncio
 import time
+from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 import atexit
 
 from .models.requests import QueryRequest, UploadRequest
 from .models.responses import QueryResponse, UploadResponse, HealthResponse
 from ..core.error_handling import RAGSystemError, QueryError, EmbeddingError, LLMError
+from ..storage.feedback_store import FeedbackStore
 # Global heartbeat monitor - will be set by main.py
 heartbeat_monitor = None
 from .management_api import create_management_router
@@ -44,6 +46,9 @@ def create_api_app(container, monitoring=None, heartbeat_monitor_instance=None) 
     # Get configuration
     config_manager = container.get('config_manager')
     config = config_manager.get_config()
+    
+    # Initialize feedback store
+    feedback_store = FeedbackStore(storage_path="data/feedback_store.db")
     
     # Create FastAPI app
     app = FastAPI(
@@ -165,8 +170,13 @@ Answer:"""
                 else:
                     response = "I couldn't find relevant information to answer your question."
                 
+                # Generate unique response ID for feedback tracking
+                import uuid
+                response_id = str(uuid.uuid4())
+                
                 return {
                     "response": response,
+                    "response_id": response_id,
                     "sources": sources,
                     "query": query_text,
                     "context_used": len(context_texts)
@@ -1223,6 +1233,132 @@ Answer:"""
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))
 
+    # Feedback endpoints
+    @app.post("/feedback")
+    async def submit_feedback(request: dict):
+        """Collect user feedback on responses"""
+        try:
+            # Extract feedback data
+            query = request.get('query', '')
+            response_id = request.get('response_id', '')
+            response_text = request.get('response_text', '')
+            helpful = request.get('helpful', False)
+            feedback_text = request.get('feedback_text', '')
+            confidence_score = request.get('confidence_score', 0.0)
+            confidence_level = request.get('confidence_level', 'unknown')
+            sources_count = request.get('sources_count', 0)
+            user_id = request.get('user_id', 'anonymous')
+            session_id = request.get('session_id', '')
+            
+            # Additional metadata
+            metadata = {
+                'user_agent': request.get('user_agent', ''),
+                'processing_time': request.get('processing_time', 0),
+                'sources': request.get('sources', [])
+            }
+            
+            # Validate required fields
+            if not query:
+                raise HTTPException(status_code=400, detail="Query is required")
+            
+            # Store feedback
+            feedback_data = {
+                'query': query,
+                'response_id': response_id,
+                'response_text': response_text,
+                'helpful': bool(helpful),
+                'feedback_text': feedback_text,
+                'confidence_score': float(confidence_score),
+                'confidence_level': confidence_level,
+                'sources_count': int(sources_count),
+                'user_id': user_id,
+                'session_id': session_id,
+                'timestamp': datetime.now().isoformat(),
+                **metadata
+            }
+            
+            feedback_id = feedback_store.add_feedback(feedback_data)
+            
+            # Use feedback to improve system (placeholder for future ML integration)
+            if not helpful and feedback_text:
+                logger.info(f"Negative feedback received for query: '{query[:50]}...' - {feedback_text}")
+                # TODO: Integrate with reranking model or query enhancement
+            
+            return {
+                "status": "feedback received",
+                "feedback_id": feedback_id,
+                "message": "Thank you for your feedback! It helps us improve the system."
+            }
+            
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error(f"Failed to process feedback: {e}")
+            raise HTTPException(status_code=500, detail="Failed to process feedback")
+    
+    @app.get("/feedback/stats")
+    async def get_feedback_stats(days: int = 30):
+        """Get feedback statistics"""
+        try:
+            stats = feedback_store.get_feedback_stats(days=days)
+            return stats
+        except Exception as e:
+            logger.error(f"Failed to get feedback stats: {e}")
+            raise HTTPException(status_code=500, detail="Failed to get feedback statistics")
+    
+    @app.get("/feedback/suggestions")
+    async def get_improvement_suggestions():
+        """Get system improvement suggestions based on feedback"""
+        try:
+            suggestions = feedback_store.get_improvement_suggestions()
+            return {
+                "suggestions": suggestions,
+                "count": len(suggestions),
+                "generated_at": datetime.now().isoformat()
+            }
+        except Exception as e:
+            logger.error(f"Failed to get improvement suggestions: {e}")
+            raise HTTPException(status_code=500, detail="Failed to get improvement suggestions")
+    
+    @app.get("/feedback/recent")
+    async def get_recent_feedback(limit: int = 50, helpful_only: bool = False):
+        """Get recent feedback entries"""
+        try:
+            feedback_list = feedback_store.get_recent_feedback(limit=limit, helpful_only=helpful_only)
+            return {
+                "feedback": feedback_list,
+                "count": len(feedback_list),
+                "limit": limit,
+                "helpful_only": helpful_only
+            }
+        except Exception as e:
+            logger.error(f"Failed to get recent feedback: {e}")
+            raise HTTPException(status_code=500, detail="Failed to get recent feedback")
+    
+    @app.post("/feedback/export")
+    async def export_feedback(request: dict):
+        """Export feedback data for analysis"""
+        try:
+            output_path = request.get('output_path', 'feedback_export.json')
+            format_type = request.get('format', 'json')
+            
+            success = feedback_store.export_feedback(output_path, format_type)
+            
+            if success:
+                return {
+                    "status": "success",
+                    "message": f"Feedback exported to {output_path}",
+                    "format": format_type
+                }
+            else:
+                raise HTTPException(status_code=500, detail="Export failed")
+                
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error(f"Failed to export feedback: {e}")
+            raise HTTPException(status_code=500, detail="Failed to export feedback")
+
     @app.exception_handler(RAGSystemError)
     async def rag_error_handler(request, exc: RAGSystemError):
         """Handle RAG system specific errors"""
@@ -1258,6 +1394,14 @@ Answer:"""
         logging.info("✅ ServiceNow API routes registered")
     except Exception as e:
         logging.warning(f"⚠️ ServiceNow API routes not available: {e}")
+    
+    # Add conversation router
+    try:
+        from .routes.conversation import router as conversation_router
+        app.include_router(conversation_router, prefix="/api")
+        logging.info("✅ Conversation API routes registered")
+    except Exception as e:
+        logging.warning(f"⚠️ Conversation API routes not available: {e}")
 
     # Startup and shutdown events
     @app.on_event("startup")

@@ -76,6 +76,7 @@ python-magic
 # Azure AI services
 azure-cognitiveservices-vision-computervision
 azure-ai-documentintelligence  # Optional
+azure-ai-inference  # For Azure AI Inference LLM
 msrest
 azure-core
 
@@ -103,6 +104,19 @@ openpyxl
 # Additional utilities
 python-dateutil
 Pillow
+
+# LangGraph and conversation dependencies
+langgraph
+langchain
+langchain-core
+langchain-community
+
+# WebSocket support for real-time conversations
+websockets
+
+# Additional conversation processing
+textstat
+emoji
 
 
 # Uncomment if using alternative UI framework

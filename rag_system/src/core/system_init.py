@@ -282,6 +282,12 @@ def initialize_system() -> DependencyContainer:
         logging.info("✅ RAG System initialization completed successfully")
         print("✅ RAG System initialization completed successfully")
         
+        # Set global container for API access
+        print("🔧 Setting global container...")
+        from .dependency_container import set_dependency_container
+        set_dependency_container(container)
+        print("   ✅ Global container set")
+        
         # Log system info
         print("🔧 Logging system info...")
         log_system_info(container)

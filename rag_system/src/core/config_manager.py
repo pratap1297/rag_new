@@ -64,7 +64,7 @@ class IngestionConfig:
 class RetrievalConfig:
     """Retrieval configuration"""
     top_k: int = 5
-    similarity_threshold: float = 0.7
+    similarity_threshold: float = 0.3  # Lowered from 0.7 to allow more results through
     rerank_top_k: int = 3
     enable_reranking: bool = True
 

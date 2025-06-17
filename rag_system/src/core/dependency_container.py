@@ -217,12 +217,19 @@ def create_embedder(container: DependencyContainer):
     embedding_config = config_manager.get_config('embedding')
     
     print(f"     📋 Embedder config: provider={embedding_config.provider}, model={embedding_config.model_name}")
+    
+    # Get endpoint for Azure if needed
+    endpoint = None
+    if embedding_config.provider == 'azure':
+        endpoint = os.getenv('AZURE_EMBEDDINGS_ENDPOINT')
+    
     embedder = Embedder(
         provider=embedding_config.provider,
         model_name=embedding_config.model_name,
         device=embedding_config.device,
         batch_size=embedding_config.batch_size,
-        api_key=embedding_config.api_key
+        api_key=embedding_config.api_key,
+        endpoint=endpoint
     )
     print(f"     ✅ Embedder created successfully")
     return embedder
@@ -255,14 +262,24 @@ def create_llm_client(container: DependencyContainer):
         from pathlib import Path
         sys.path.insert(0, str(Path(__file__).parent.parent))
         from retrieval.llm_client import LLMClient
-    import os
-    # Use default values to avoid circular dependency with config_manager
+    
+    # Get configuration from config manager
+    config_manager = container.get('config_manager')
+    llm_config = config_manager.get_config('llm')
+    
+    # Get endpoint for Azure if needed
+    endpoint = None
+    if llm_config.provider == 'azure':
+        import os
+        endpoint = os.getenv('AZURE_CHAT_ENDPOINT')
+    
     return LLMClient(
-        provider="groq",
-        model_name="meta-llama/llama-4-maverick-17b-128e-instruct",
-        api_key=os.getenv("GROQ_API_KEY"),
-        temperature=0.7,
-        max_tokens=1000
+        provider=llm_config.provider,
+        model_name=llm_config.model_name,
+        api_key=llm_config.api_key,
+        temperature=llm_config.temperature,
+        max_tokens=llm_config.max_tokens,
+        endpoint=endpoint
     )
 
 def create_reranker(container: DependencyContainer):
@@ -356,6 +373,21 @@ def create_servicenow_integration(container: DependencyContainer):
         # Return None if ServiceNow integration fails - it's optional
         return None
 
+def create_conversation_manager(container: DependencyContainer):
+    """Factory for ConversationManager"""
+    print(f"     🔧 Creating conversation manager...")
+    try:
+        from ..conversation.conversation_manager import ConversationManager
+        conversation_manager = ConversationManager(container)
+        print(f"     ✅ Conversation manager created successfully")
+        return conversation_manager
+    except ImportError as e:
+        print(f"     ⚠️ LangGraph not available: {e}")
+        return None
+    except Exception as e:
+        print(f"     ❌ Failed to create conversation manager: {e}")
+        return None
+
 def register_core_services(container: DependencyContainer):
     """Register all core services"""
     container.register('config_manager', create_config_manager)
@@ -371,6 +403,7 @@ def register_core_services(container: DependencyContainer):
     container.register('query_engine', create_query_engine)
     container.register('ingestion_engine', create_ingestion_engine)
     container.register('servicenow_integration', create_servicenow_integration)
+    container.register('conversation_manager', create_conversation_manager)
 
 # Global container instance for API access
 _global_container = None

@@ -137,16 +137,94 @@ class CohereEmbedder(BaseEmbedder):
         """Get embedding dimension"""
         return self._dimension
 
+class AzureEmbedder(BaseEmbedder):
+    """Azure AI Inference embedder"""
+    
+    def __init__(self, model_name: str = "Cohere-embed-v3-english", 
+                 api_key: Optional[str] = None, endpoint: Optional[str] = None, 
+                 batch_size: int = 96):
+        self.model_name = model_name
+        self.api_key = api_key or os.getenv('AZURE_API_KEY')
+        self.endpoint = endpoint or os.getenv('AZURE_EMBEDDINGS_ENDPOINT')
+        self.batch_size = batch_size
+        self.client = None
+        self._dimension = None
+        self._load_client()
+    
+    def _load_client(self):
+        """Load the Azure AI Inference client"""
+        if not self.api_key:
+            raise EmbeddingError("Azure API key not provided. Set AZURE_API_KEY environment variable.")
+        if not self.endpoint:
+            raise EmbeddingError("Azure endpoint not provided. Set AZURE_EMBEDDINGS_ENDPOINT environment variable.")
+        
+        try:
+            from azure.ai.inference import EmbeddingsClient
+            from azure.core.credentials import AzureKeyCredential
+            
+            self.client = EmbeddingsClient(
+                endpoint=self.endpoint,
+                credential=AzureKeyCredential(self.api_key)
+            )
+            logging.info(f"Loaded Azure AI Inference client with model: {self.model_name}")
+            
+            # Get dimension by testing with a sample text
+            test_response = self.client.embed(
+                input=["test"],
+                model=self.model_name,
+                input_type="document"
+            )
+            self._dimension = len(test_response.data[0].embedding)
+            logging.info(f"Azure embedding dimension: {self._dimension}")
+            
+        except ImportError:
+            raise EmbeddingError("azure-ai-inference package not installed")
+        except Exception as e:
+            raise EmbeddingError(f"Failed to initialize Azure AI Inference client: {e}")
+    
+    def embed_texts(self, texts: List[str]) -> List[List[float]]:
+        """Generate embeddings for multiple texts"""
+        if not texts:
+            return []
+        
+        try:
+            import time
+            all_embeddings = []
+            for i in range(0, len(texts), self.batch_size):
+                batch = texts[i:i + self.batch_size]
+                start_time = time.time()
+                response = self.client.embed(
+                    input=batch,
+                    model=self.model_name,
+                    input_type="document"
+                )
+                elapsed = time.time() - start_time
+                logging.debug(f"Azure embedding batch ({len(batch)} texts) took {elapsed:.2f} seconds")
+                
+                # Extract embeddings from response
+                batch_embeddings = [item.embedding for item in response.data]
+                all_embeddings.extend(batch_embeddings)
+            return all_embeddings
+        except Exception as e:
+            logging.error(f"Azure embedding error: {e}")
+            raise EmbeddingError(f"Failed to generate Azure embeddings: {e}")
+    
+    def get_dimension(self) -> int:
+        """Get embedding dimension"""
+        return self._dimension
+
 class Embedder:
     """Multi-provider text embedder"""
     
     def __init__(self, provider: str = "cohere", model_name: Optional[str] = None, 
-                 api_key: Optional[str] = None, device: str = "cpu", batch_size: int = 32):
+                 api_key: Optional[str] = None, device: str = "cpu", batch_size: int = 32,
+                 endpoint: Optional[str] = None):
         self.provider = provider.lower()
         self.model_name = model_name
         self.api_key = api_key
         self.device = device
         self.batch_size = batch_size
+        self.endpoint = endpoint
         self.embedder = None
         
         self._initialize_embedder()
@@ -159,6 +237,14 @@ class Embedder:
             self.embedder = CohereEmbedder(
                 model_name=model,
                 api_key=self.api_key,
+                batch_size=self.batch_size
+            )
+        elif self.provider == "azure":
+            model = self.model_name or "Cohere-embed-v3-english"
+            self.embedder = AzureEmbedder(
+                model_name=model,
+                api_key=self.api_key,
+                endpoint=self.endpoint,
                 batch_size=self.batch_size
             )
         elif self.provider == "sentence-transformers":

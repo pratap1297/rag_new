@@ -39,18 +39,289 @@ class SemanticChunker:
                  chunk_size: int = 1000,
                  chunk_overlap: int = 200,
                  similarity_threshold: float = 0.5,
-                 model_name: str = "all-MiniLM-L6-v2"):
+                 model_name: str = "all-MiniLM-L6-v2",
+                 enable_smart_overlap: bool = True):
         self.chunk_size = chunk_size
-        self.chunk_overlap = chunk_overlap
+        self.chunk_overlap = chunk_overlap  # Default overlap
         self.similarity_threshold = similarity_threshold
         self.model_name = model_name
+        self.enable_smart_overlap = enable_smart_overlap
         self.model = None
         self.enabled = SENTENCE_TRANSFORMERS_AVAILABLE
+        
+        # Content type detection patterns
+        self._init_content_patterns()
         
         if self.enabled:
             self._initialize_model()
         else:
             logging.warning("Semantic chunking disabled - using fallback chunking")
+    
+    def _init_content_patterns(self):
+        """Initialize patterns for content type detection"""
+        # Code indicators
+        self.code_patterns = {
+            'keywords': ['def ', 'class ', 'function', 'import ', 'from ', 'return ', 'if ', 'else:', 'elif ', 'for ', 'while ', 'try:', 'except:', 'finally:'],
+            'symbols': ['{', '}', ';', '->', '=>', '==', '!=', '<=', '>=', '&&', '||', '++', '--'],
+            'brackets': ['()', '[]', '{}'],
+            'indentation': r'^\s{4,}|\t+',  # 4+ spaces or tabs
+            'comments': ['#', '//', '/*', '*/', '<!--', '-->']
+        }
+        
+        # Structured data indicators
+        self.structured_patterns = {
+            'json': ['{', '}', '":', '",', '[', ']'],
+            'xml': ['<', '>', '</', '/>', '<?', '?>'],
+            'csv': [',', '"', '\n'],
+            'yaml': [':', '-', '|', '>'],
+            'markdown': ['#', '##', '###', '**', '*', '`', '```', '---'],
+            'tables': ['|', '+', '-', '=']
+        }
+        
+        # Technical documentation indicators
+        self.technical_patterns = {
+            'api': ['GET', 'POST', 'PUT', 'DELETE', 'HTTP', 'API', 'endpoint', 'request', 'response'],
+            'config': ['config', 'setting', 'parameter', 'option', 'value', 'default'],
+            'database': ['SELECT', 'INSERT', 'UPDATE', 'DELETE', 'FROM', 'WHERE', 'JOIN', 'TABLE'],
+            'math': ['=', '+', '-', '*', '/', '^', '∑', '∫', '∂', '≤', '≥', '≠', '±']
+        }
+    
+    def _calculate_dynamic_overlap(self, text: str, chunk_size: int) -> int:
+        """Calculate overlap based on content type and characteristics"""
+        if not self.enable_smart_overlap:
+            return self.chunk_overlap
+        
+        # Detect content type
+        content_type = self._detect_content_type(text)
+        
+        # Calculate base overlap based on content type
+        if content_type == 'code':
+            # Less overlap for code - preserve function/class boundaries
+            base_overlap = min(50, chunk_size // 10)
+        elif content_type == 'structured_data':
+            # More overlap for structured data - preserve context
+            base_overlap = min(300, chunk_size // 3)
+        elif content_type == 'technical':
+            # Medium overlap for technical docs - preserve procedure context
+            base_overlap = min(250, chunk_size // 4)
+        elif content_type == 'list':
+            # Minimal overlap for lists - avoid breaking items
+            base_overlap = min(100, chunk_size // 8)
+        elif content_type == 'dialogue':
+            # Medium overlap for dialogue - preserve conversation flow
+            base_overlap = min(200, chunk_size // 5)
+        else:
+            # Default overlap for prose
+            base_overlap = self.chunk_overlap
+        
+        # Adjust based on content characteristics
+        adjusted_overlap = self._adjust_overlap_by_characteristics(text, base_overlap, chunk_size)
+        
+        # Ensure overlap doesn't exceed reasonable bounds
+        max_overlap = min(chunk_size // 2, 500)  # Max 50% of chunk size or 500 chars
+        min_overlap = 20  # Minimum overlap
+        
+        final_overlap = max(min_overlap, min(adjusted_overlap, max_overlap))
+        
+        logging.debug(f"Smart overlap: content_type={content_type}, base={base_overlap}, adjusted={adjusted_overlap}, final={final_overlap}")
+        
+        return final_overlap
+    
+    def _detect_content_type(self, text: str) -> str:
+        """Detect the primary content type of the text"""
+        text_lower = text.lower()
+        text_sample = text[:1000]  # Analyze first 1000 chars for efficiency
+        
+        # Count indicators for each content type
+        scores = {
+            'code': self._score_code_content(text_sample),
+            'structured_data': self._score_structured_content(text_sample),
+            'technical': self._score_technical_content(text_lower),
+            'list': self._score_list_content(text_sample),
+            'dialogue': self._score_dialogue_content(text_sample),
+            'prose': 1.0  # Default baseline
+        }
+        
+        # Return the content type with highest score
+        max_score = max(scores.values())
+        if max_score > 1.5:  # Threshold for confident detection
+            return max(scores, key=scores.get)
+        
+        return 'prose'  # Default to prose if no clear pattern
+    
+    def _score_code_content(self, text: str) -> float:
+        """Score text for code content indicators"""
+        score = 0.0
+        
+        # Check for code keywords
+        keyword_count = sum(1 for keyword in self.code_patterns['keywords'] if keyword in text)
+        score += keyword_count * 0.3
+        
+        # Check for code symbols
+        symbol_count = sum(1 for symbol in self.code_patterns['symbols'] if symbol in text)
+        score += symbol_count * 0.2
+        
+        # Check for indentation patterns
+        lines = text.split('\n')
+        indented_lines = sum(1 for line in lines if re.match(self.code_patterns['indentation'], line))
+        if lines:
+            score += (indented_lines / len(lines)) * 2.0
+        
+        # Check for comments
+        comment_count = sum(1 for comment in self.code_patterns['comments'] if comment in text)
+        score += comment_count * 0.4
+        
+        # Check for bracket usage
+        bracket_density = sum(text.count(bracket) for bracket in ['(', ')', '[', ']', '{', '}']) / len(text)
+        score += bracket_density * 10
+        
+        return score
+    
+    def _score_structured_content(self, text: str) -> float:
+        """Score text for structured data indicators"""
+        score = 0.0
+        
+        # JSON indicators
+        json_score = sum(text.count(indicator) for indicator in self.structured_patterns['json'])
+        score += json_score * 0.1
+        
+        # XML indicators
+        xml_score = sum(text.count(indicator) for indicator in self.structured_patterns['xml'])
+        score += xml_score * 0.1
+        
+        # CSV indicators
+        if ',' in text and '\n' in text:
+            lines = text.split('\n')
+            csv_like_lines = sum(1 for line in lines if line.count(',') >= 2)
+            if lines:
+                score += (csv_like_lines / len(lines)) * 3.0
+        
+        # YAML indicators
+        yaml_score = sum(text.count(indicator) for indicator in self.structured_patterns['yaml'])
+        score += yaml_score * 0.1
+        
+        # Markdown indicators
+        markdown_score = sum(text.count(indicator) for indicator in self.structured_patterns['markdown'])
+        score += markdown_score * 0.05
+        
+        # Table indicators
+        table_score = sum(text.count(indicator) for indicator in self.structured_patterns['tables'])
+        score += table_score * 0.1
+        
+        return score
+    
+    def _score_technical_content(self, text: str) -> float:
+        """Score text for technical documentation indicators"""
+        score = 0.0
+        
+        # API documentation
+        api_count = sum(1 for term in self.technical_patterns['api'] if term.lower() in text)
+        score += api_count * 0.2
+        
+        # Configuration content
+        config_count = sum(1 for term in self.technical_patterns['config'] if term.lower() in text)
+        score += config_count * 0.15
+        
+        # Database content
+        db_count = sum(1 for term in self.technical_patterns['database'] if term.upper() in text.upper())
+        score += db_count * 0.25
+        
+        # Mathematical content
+        math_count = sum(1 for symbol in self.technical_patterns['math'] if symbol in text)
+        score += math_count * 0.1
+        
+        return score
+    
+    def _score_list_content(self, text: str) -> float:
+        """Score text for list-like content"""
+        lines = text.split('\n')
+        if not lines:
+            return 0.0
+        
+        # Count lines that start with list indicators
+        list_indicators = ['•', '-', '*', '+', '○', '▪', '▫']
+        numbered_pattern = r'^\s*\d+[\.\)]\s+'
+        
+        list_lines = 0
+        for line in lines:
+            line_stripped = line.strip()
+            if any(line_stripped.startswith(indicator) for indicator in list_indicators):
+                list_lines += 1
+            elif re.match(numbered_pattern, line):
+                list_lines += 1
+        
+        # Return ratio of list lines to total lines
+        return (list_lines / len(lines)) * 4.0
+    
+    def _score_dialogue_content(self, text: str) -> float:
+        """Score text for dialogue/conversation content"""
+        score = 0.0
+        
+        # Look for dialogue indicators
+        dialogue_patterns = ['"', "'", ':', 'said', 'asked', 'replied', 'answered']
+        
+        for pattern in dialogue_patterns:
+            score += text.count(pattern) * 0.1
+        
+        # Look for speaker indicators (Name: or "Name said")
+        lines = text.split('\n')
+        speaker_lines = sum(1 for line in lines if re.match(r'^[A-Z][a-z]+\s*:', line.strip()))
+        if lines:
+            score += (speaker_lines / len(lines)) * 3.0
+        
+        return score
+    
+    def _adjust_overlap_by_characteristics(self, text: str, base_overlap: int, chunk_size: int) -> int:
+        """Adjust overlap based on additional text characteristics"""
+        adjustment_factor = 1.0
+        
+        # Sentence length analysis
+        sentences = self._split_into_sentences(text[:500])  # Sample for efficiency
+        if sentences:
+            avg_sentence_length = sum(len(s) for s in sentences) / len(sentences)
+            
+            if avg_sentence_length > 150:
+                # Long sentences - increase overlap to preserve context
+                adjustment_factor *= 1.3
+            elif avg_sentence_length < 50:
+                # Short sentences - can reduce overlap
+                adjustment_factor *= 0.8
+        
+        # Paragraph density
+        paragraph_count = text.count('\n\n') + 1
+        text_length = len(text)
+        if text_length > 0:
+            paragraph_density = paragraph_count / (text_length / 1000)  # Paragraphs per 1000 chars
+            
+            if paragraph_density > 3:
+                # High paragraph density - reduce overlap
+                adjustment_factor *= 0.9
+            elif paragraph_density < 1:
+                # Low paragraph density - increase overlap
+                adjustment_factor *= 1.2
+        
+        # Punctuation density (complexity indicator)
+        punctuation_chars = '.,;:!?'
+        punctuation_count = sum(text.count(p) for p in punctuation_chars)
+        if text_length > 0:
+            punctuation_density = punctuation_count / text_length
+            
+            if punctuation_density > 0.05:
+                # High punctuation - complex text, increase overlap
+                adjustment_factor *= 1.1
+        
+        # Apply adjustment
+        adjusted_overlap = int(base_overlap * adjustment_factor)
+        
+        return adjusted_overlap
+    
+    def _is_code(self, text: str) -> bool:
+        """Legacy method for backward compatibility"""
+        return self._detect_content_type(text) == 'code'
+    
+    def _is_structured_data(self, text: str) -> bool:
+        """Legacy method for backward compatibility"""
+        return self._detect_content_type(text) == 'structured_data'
     
     def _initialize_model(self):
         """Initialize the sentence transformer model"""
@@ -189,6 +460,7 @@ class SemanticChunker:
         
         chunks = []
         current_chunk_start = 0
+        full_text = ' '.join(sentences)  # Get full text for smart overlap
         
         for boundary in boundaries:
             # Check if chunk would be too large
@@ -204,7 +476,7 @@ class SemanticChunker:
                     metadata=metadata
                 )
                 chunks.append(chunk)
-                current_chunk_start = max(0, boundary.position - self._calculate_overlap_sentences(sentences, boundary.position))
+                current_chunk_start = max(0, boundary.position - self._calculate_overlap_sentences(sentences, boundary.position, full_text))
         
         # Create final chunk if there are remaining sentences
         if current_chunk_start < len(sentences):
@@ -227,6 +499,7 @@ class SemanticChunker:
         chunks = []
         current_chunk = []
         current_length = 0
+        full_text = ' '.join(sentences)  # Get full text for smart overlap
         
         for sentence in sentences:
             sentence_length = len(sentence)
@@ -243,8 +516,8 @@ class SemanticChunker:
                 )
                 chunks.append(chunk)
                 
-                # Start new chunk with overlap
-                overlap_sentences = self._get_overlap_sentences(current_chunk)
+                # Start new chunk with smart overlap
+                overlap_sentences = self._get_overlap_sentences(current_chunk, full_text)
                 current_chunk = overlap_sentences + [sentence]
                 current_length = sum(len(s) for s in current_chunk)
             else:
@@ -265,14 +538,23 @@ class SemanticChunker:
         
         return chunks
     
-    def _calculate_overlap_sentences(self, sentences: List[str], position: int) -> int:
-        """Calculate how many sentences to include for overlap"""
+    def _calculate_overlap_sentences(self, sentences: List[str], position: int, text_context: str = "") -> int:
+        """Calculate how many sentences to include for overlap using smart overlap"""
+        # Use smart overlap calculation
+        if text_context:
+            dynamic_overlap = self._calculate_dynamic_overlap(text_context, self.chunk_size)
+        else:
+            # Fallback to analyzing sentences around position
+            context_sentences = sentences[max(0, position-5):position+5]
+            context_text = ' '.join(context_sentences)
+            dynamic_overlap = self._calculate_dynamic_overlap(context_text, self.chunk_size)
+        
         overlap_chars = 0
         overlap_sentences = 0
         
         for i in range(position - 1, -1, -1):
             sentence_length = len(sentences[i])
-            if overlap_chars + sentence_length <= self.chunk_overlap:
+            if overlap_chars + sentence_length <= dynamic_overlap:
                 overlap_chars += sentence_length
                 overlap_sentences += 1
             else:
@@ -280,13 +562,17 @@ class SemanticChunker:
         
         return overlap_sentences
     
-    def _get_overlap_sentences(self, sentences: List[str]) -> List[str]:
-        """Get sentences for overlap from the end of current chunk"""
+    def _get_overlap_sentences(self, sentences: List[str], full_text: str = "") -> List[str]:
+        """Get sentences for overlap from the end of current chunk using smart overlap"""
+        # Calculate dynamic overlap
+        context_text = full_text if full_text else ' '.join(sentences)
+        dynamic_overlap = self._calculate_dynamic_overlap(context_text, self.chunk_size)
+        
         overlap_chars = 0
         overlap_sentences = []
         
         for sentence in reversed(sentences):
-            if overlap_chars + len(sentence) <= self.chunk_overlap:
+            if overlap_chars + len(sentence) <= dynamic_overlap:
                 overlap_chars += len(sentence)
                 overlap_sentences.insert(0, sentence)
             else:
@@ -361,7 +647,14 @@ class SemanticChunker:
             'chunk_overlap': self.chunk_overlap,
             'similarity_threshold': self.similarity_threshold,
             'enabled': self.enabled,
-            'model_available': SENTENCE_TRANSFORMERS_AVAILABLE
+            'model_available': SENTENCE_TRANSFORMERS_AVAILABLE,
+            'smart_overlap_enabled': self.enable_smart_overlap,
+            'features': {
+                'content_type_detection': True,
+                'dynamic_overlap_calculation': True,
+                'characteristic_analysis': True,
+                'supported_content_types': ['code', 'structured_data', 'technical', 'list', 'dialogue', 'prose']
+            }
         }
 
 def create_semantic_chunker(config_manager) -> SemanticChunker:
@@ -372,5 +665,6 @@ def create_semantic_chunker(config_manager) -> SemanticChunker:
         chunk_size=config.ingestion.chunk_size,
         chunk_overlap=config.ingestion.chunk_overlap,
         similarity_threshold=0.5,  # Can be made configurable
-        model_name="all-MiniLM-L6-v2"  # Lightweight model for chunking
+        model_name="all-MiniLM-L6-v2",  # Lightweight model for chunking
+        enable_smart_overlap=True
     ) 

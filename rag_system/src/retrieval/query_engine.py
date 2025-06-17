@@ -3,8 +3,10 @@ Query Engine
 Main engine for processing user queries and generating responses
 """
 import logging
-from typing import Dict, List, Any, Optional
+from typing import Dict, List, Any, Optional, Set, Tuple
 from datetime import datetime
+from collections import defaultdict, Counter
+import math
 
 from ..core.error_handling import RetrievalError
 
@@ -20,7 +22,14 @@ class QueryEngine:
         self.reranker = reranker
         self.query_enhancer = query_enhancer
         
+        # Source diversity configuration
+        self.enable_source_diversity = getattr(self.config.retrieval, 'enable_source_diversity', True)
+        self.diversity_weight = getattr(self.config.retrieval, 'diversity_weight', 0.3)
+        self.max_chunks_per_doc = getattr(self.config.retrieval, 'max_chunks_per_doc', 3)
+        self.min_source_types = getattr(self.config.retrieval, 'min_source_types', 2)
+        
         logging.info(f"Query engine initialized with reranker: {reranker is not None}, query enhancer: {query_enhancer is not None}")
+        logging.info(f"Source diversity enabled: {self.enable_source_diversity}, weight: {self.diversity_weight}")
     
     def process_query(self, query: str, filters: Dict[str, Any] = None, 
                      top_k: int = None) -> Dict[str, Any]:
@@ -46,10 +55,11 @@ class QueryEngine:
                 # Generate query embedding
                 query_embedding = self.embedder.embed_text(query_text)
                 
-                # Search for similar chunks
+                # Search for similar chunks (get more results for diversity)
+                search_k = max(top_k * 3, 20) if self.enable_source_diversity else top_k
                 search_results = self.faiss_store.search_with_metadata(
                     query_vector=query_embedding,
-                    k=top_k
+                    k=search_k
                 )
                 
                 # Add confidence weighting to results
@@ -85,20 +95,35 @@ class QueryEngine:
                     documents=filtered_results, 
                     top_k=self.config.retrieval.rerank_top_k
                 )
-                top_results = reranked_results
+                pre_diversity_results = reranked_results
             else:
-                # Take top k results without reranking
-                top_results = filtered_results[:top_k]
+                # Take more results for diversity processing
+                pre_diversity_results = filtered_results
+            
+            # Apply source diversity scoring and selection
+            if self.enable_source_diversity:
+                top_results = self._apply_source_diversity_scoring(pre_diversity_results, top_k)
+            else:
+                top_results = pre_diversity_results[:top_k]
             
             # Generate response using LLM
             response = self._generate_llm_response(query, top_results)
+            
+            # Calculate confidence score (now includes diversity metrics)
+            confidence = self._calculate_confidence(top_results)
+            
+            # Calculate diversity metrics
+            diversity_metrics = self._calculate_diversity_metrics(top_results)
             
             # Prepare response with enhancement info
             response_data = {
                 'query': query,
                 'response': response,
+                'confidence_score': confidence,
+                'confidence_level': 'high' if confidence > 0.8 else 'medium' if confidence > 0.5 else 'low',
                 'sources': self._format_sources(top_results),
                 'total_sources': len(top_results),
+                'diversity_metrics': diversity_metrics,
                 'timestamp': datetime.now().isoformat()
             }
             
@@ -168,6 +193,8 @@ Answer:"""
         return {
             'query': query,
             'response': "I couldn't find any relevant information to answer your question. Please try rephrasing your query or check if the information exists in the knowledge base.",
+            'confidence_score': 0.0,
+            'confidence_level': 'low',
             'sources': [],
             'total_sources': 0,
             'timestamp': datetime.now().isoformat()
@@ -198,8 +225,379 @@ Answer:"""
         logging.info(f"Merged {len(all_results)} results into {len(merged_results)} unique results")
         return merged_results
     
+    def _calculate_confidence(self, results: List[Dict[str, Any]]) -> float:
+        """Calculate confidence score based on search results quality and diversity"""
+        if not results:
+            return 0.0
+        
+        # Factor 1: Average similarity scores (50% weight - reduced to make room for diversity)
+        similarity_scores = [r.get('similarity_score', 0) for r in results]
+        avg_similarity = sum(similarity_scores) / len(similarity_scores)
+        
+        # Factor 2: Enhanced source diversity metrics (30% weight - increased)
+        unique_docs = set()
+        unique_source_types = set()
+        unique_authors = set()
+        
+        for result in results:
+            metadata = result.get('metadata', {})
+            doc_id = metadata.get('doc_id') or result.get('doc_id', 'unknown')
+            source_type = metadata.get('source_type', 'unknown')
+            author = metadata.get('author', metadata.get('creator', 'unknown'))
+            
+            unique_docs.add(doc_id)
+            unique_source_types.add(source_type)
+            unique_authors.add(author)
+        
+        # Document diversity (normalized to expected range)
+        doc_diversity = min(len(unique_docs) / max(len(results) // 2, 1), 1.0)
+        
+        # Source type diversity
+        type_diversity = min(len(unique_source_types) / max(self.min_source_types, 1), 1.0)
+        
+        # Author diversity
+        author_diversity = min(len(unique_authors) / max(len(results) // 3, 1), 1.0)
+        
+        # Combined diversity score
+        diversity_score = (doc_diversity * 0.5) + (type_diversity * 0.3) + (author_diversity * 0.2)
+        
+        # Factor 3: Score consistency - lower variance means higher confidence (15% weight)
+        if len(similarity_scores) > 1:
+            mean_score = avg_similarity
+            variance = sum((score - mean_score) ** 2 for score in similarity_scores) / len(similarity_scores)
+            consistency = max(0, 1 - (variance * 2))  # Normalize variance impact
+        else:
+            consistency = 1.0  # Single result has perfect consistency
+        
+        # Factor 4: Diversity scoring bonus (5% weight)
+        diversity_bonus = 0.0
+        if self.enable_source_diversity and results:
+            # Check if results have diversity scores (from diversity scoring)
+            has_diversity_scores = any('diversity_score' in r for r in results)
+            if has_diversity_scores:
+                avg_diversity_score = sum(r.get('diversity_score', 0) for r in results) / len(results)
+                diversity_bonus = avg_diversity_score * 0.5  # Moderate bonus
+        
+        # Weighted combination
+        confidence = (
+            (avg_similarity * 0.5) + 
+            (diversity_score * 0.3) + 
+            (consistency * 0.15) + 
+            (diversity_bonus * 0.05)
+        )
+        
+        # Apply bonus for high-quality results
+        high_quality_count = sum(1 for score in similarity_scores if score > 0.8)
+        if high_quality_count > 0:
+            quality_bonus = min(high_quality_count / len(similarity_scores) * 0.1, 0.1)
+            confidence += quality_bonus
+        
+        # Apply penalty for low diversity (if enabled)
+        if self.enable_source_diversity and len(unique_docs) == 1 and len(results) > 2:
+            # Penalty for all results from single document
+            diversity_penalty = 0.1
+            confidence -= diversity_penalty
+        
+        # Ensure confidence is between 0 and 1
+        confidence = max(0.0, min(1.0, confidence))
+        
+        logging.debug(f"Enhanced confidence calculation: avg_sim={avg_similarity:.3f}, "
+                     f"diversity={diversity_score:.3f}, consistency={consistency:.3f}, "
+                     f"bonus={diversity_bonus:.3f}, final={confidence:.3f}")
+        
+        return round(confidence, 2)
+    
     def get_similar_queries(self, query: str, limit: int = 5) -> List[str]:
         """Get similar queries from query history"""
         # This would require storing query history
         # For now, return empty list
         return [] 
+    
+    def _apply_source_diversity_scoring(self, results: List[Dict[str, Any]], top_k: int) -> List[Dict[str, Any]]:
+        """Apply comprehensive source diversity scoring and selection"""
+        if not results:
+            return results
+        
+        # Step 1: Calculate diversity scores for all results
+        scored_results = self._calculate_diversity_scores(results)
+        
+        # Step 2: Apply diverse source selection algorithm
+        diverse_results = self._select_diverse_sources(scored_results, top_k)
+        
+        logging.info(f"Source diversity applied: {len(results)} -> {len(diverse_results)} results")
+        return diverse_results
+    
+    def _calculate_diversity_scores(self, results: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Calculate comprehensive diversity scores for each result"""
+        if not results:
+            return results
+        
+        # Analyze source distribution
+        doc_counts = Counter()
+        source_type_counts = Counter()
+        author_counts = Counter()
+        date_counts = Counter()
+        
+        for result in results:
+            metadata = result.get('metadata', {})
+            doc_id = metadata.get('doc_id', result.get('doc_id', 'unknown'))
+            source_type = metadata.get('source_type', 'unknown')
+            author = metadata.get('author', metadata.get('creator', 'unknown'))
+            date = metadata.get('created_date', metadata.get('date', 'unknown'))
+            
+            doc_counts[doc_id] += 1
+            source_type_counts[source_type] += 1
+            author_counts[author] += 1
+            date_counts[date] += 1
+        
+        # Calculate diversity scores
+        total_results = len(results)
+        scored_results = []
+        
+        for result in results:
+            metadata = result.get('metadata', {})
+            doc_id = metadata.get('doc_id', result.get('doc_id', 'unknown'))
+            source_type = metadata.get('source_type', 'unknown')
+            author = metadata.get('author', metadata.get('creator', 'unknown'))
+            date = metadata.get('created_date', metadata.get('date', 'unknown'))
+            
+            # Document diversity score (lower is better for diversity)
+            doc_frequency = doc_counts[doc_id] / total_results
+            doc_diversity_score = 1.0 - doc_frequency
+            
+            # Source type diversity score
+            source_type_frequency = source_type_counts[source_type] / total_results
+            source_type_diversity_score = 1.0 - source_type_frequency
+            
+            # Author diversity score
+            author_frequency = author_counts[author] / total_results
+            author_diversity_score = 1.0 - author_frequency
+            
+            # Temporal diversity score
+            date_frequency = date_counts[date] / total_results
+            temporal_diversity_score = 1.0 - date_frequency
+            
+            # Content diversity score (based on text similarity)
+            content_diversity_score = self._calculate_content_diversity_score(result, results)
+            
+            # Combined diversity score (weighted average)
+            diversity_score = (
+                doc_diversity_score * 0.3 +
+                source_type_diversity_score * 0.2 +
+                author_diversity_score * 0.15 +
+                temporal_diversity_score * 0.1 +
+                content_diversity_score * 0.25
+            )
+            
+            # Original relevance score
+            relevance_score = result.get('rerank_score', result.get('weighted_score', result.get('similarity_score', 0)))
+            
+            # Combined final score (relevance + diversity)
+            final_score = (relevance_score * (1 - self.diversity_weight)) + (diversity_score * self.diversity_weight)
+            
+            # Add scores to result
+            result_copy = result.copy()
+            result_copy.update({
+                'diversity_score': diversity_score,
+                'doc_diversity_score': doc_diversity_score,
+                'source_type_diversity_score': source_type_diversity_score,
+                'author_diversity_score': author_diversity_score,
+                'temporal_diversity_score': temporal_diversity_score,
+                'content_diversity_score': content_diversity_score,
+                'relevance_score': relevance_score,
+                'final_score': final_score
+            })
+            
+            scored_results.append(result_copy)
+        
+        # Sort by final score (descending)
+        scored_results.sort(key=lambda x: x['final_score'], reverse=True)
+        
+        return scored_results
+    
+    def _calculate_content_diversity_score(self, target_result: Dict[str, Any], all_results: List[Dict[str, Any]]) -> float:
+        """Calculate content diversity score based on text similarity with other results"""
+        target_text = target_result.get('text', '')
+        if not target_text:
+            return 0.5  # Neutral score for missing text
+        
+        # Calculate similarity with other results
+        similarities = []
+        for other_result in all_results:
+            if other_result == target_result:
+                continue
+            
+            other_text = other_result.get('text', '')
+            if not other_text:
+                continue
+            
+            # Simple text similarity (could be enhanced with embeddings)
+            similarity = self._calculate_text_similarity(target_text, other_text)
+            similarities.append(similarity)
+        
+        if not similarities:
+            return 1.0  # Maximum diversity if no other results
+        
+        # Diversity is inverse of average similarity
+        avg_similarity = sum(similarities) / len(similarities)
+        content_diversity = 1.0 - avg_similarity
+        
+        return max(0.0, min(1.0, content_diversity))
+    
+    def _calculate_text_similarity(self, text1: str, text2: str) -> float:
+        """Calculate simple text similarity using word overlap"""
+        if not text1 or not text2:
+            return 0.0
+        
+        # Simple word-based similarity
+        words1 = set(text1.lower().split())
+        words2 = set(text2.lower().split())
+        
+        if not words1 or not words2:
+            return 0.0
+        
+        intersection = len(words1.intersection(words2))
+        union = len(words1.union(words2))
+        
+        return intersection / union if union > 0 else 0.0
+    
+    def _select_diverse_sources(self, scored_results: List[Dict[str, Any]], top_k: int) -> List[Dict[str, Any]]:
+        """Select diverse sources using advanced selection algorithm"""
+        if not scored_results or top_k <= 0:
+            return []
+        
+        selected = []
+        seen_docs = set()
+        seen_source_types = set()
+        seen_authors = set()
+        doc_chunk_counts = defaultdict(int)
+        
+        # Phase 1: Prioritize diverse sources (ensure at least one from each document/type)
+        for result in scored_results:
+            if len(selected) >= top_k:
+                break
+            
+            metadata = result.get('metadata', {})
+            doc_id = metadata.get('doc_id', result.get('doc_id', 'unknown'))
+            source_type = metadata.get('source_type', 'unknown')
+            author = metadata.get('author', metadata.get('creator', 'unknown'))
+            
+            # Check diversity constraints
+            should_select = False
+            
+            # Priority 1: New document
+            if doc_id not in seen_docs:
+                should_select = True
+                seen_docs.add(doc_id)
+            
+            # Priority 2: New source type
+            elif source_type not in seen_source_types:
+                should_select = True
+                seen_source_types.add(source_type)
+            
+            # Priority 3: New author
+            elif author not in seen_authors:
+                should_select = True
+                seen_authors.add(author)
+            
+            # Priority 4: Document under chunk limit
+            elif doc_chunk_counts[doc_id] < self.max_chunks_per_doc:
+                should_select = True
+            
+            if should_select:
+                selected.append(result)
+                doc_chunk_counts[doc_id] += 1
+        
+        # Phase 2: Fill remaining slots with best remaining results
+        remaining_slots = top_k - len(selected)
+        if remaining_slots > 0:
+            remaining_results = [r for r in scored_results if r not in selected]
+            
+            # Apply stricter diversity constraints for remaining slots
+            for result in remaining_results:
+                if remaining_slots <= 0:
+                    break
+                
+                metadata = result.get('metadata', {})
+                doc_id = metadata.get('doc_id', result.get('doc_id', 'unknown'))
+                
+                # Only add if document is under chunk limit
+                if doc_chunk_counts[doc_id] < self.max_chunks_per_doc:
+                    selected.append(result)
+                    doc_chunk_counts[doc_id] += 1
+                    remaining_slots -= 1
+        
+        # Phase 3: Final ranking by combined score
+        selected.sort(key=lambda x: x.get('final_score', 0), reverse=True)
+        
+        return selected[:top_k]
+    
+    def _prioritize_diverse_sources(self, results: List[Dict], top_k: int) -> List[Dict]:
+        """Ensure diverse sources in results (legacy method for backward compatibility)"""
+        return self._select_diverse_sources(results, top_k)
+    
+    def _calculate_diversity_metrics(self, results: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """Calculate comprehensive diversity metrics for the result set"""
+        if not results:
+            return {
+                'unique_documents': 0,
+                'unique_source_types': 0,
+                'unique_authors': 0,
+                'document_distribution': {},
+                'source_type_distribution': {},
+                'diversity_index': 0.0,
+                'coverage_score': 0.0
+            }
+        
+        # Count unique elements
+        unique_docs = set()
+        unique_source_types = set()
+        unique_authors = set()
+        doc_counts = Counter()
+        source_type_counts = Counter()
+        author_counts = Counter()
+        
+        for result in results:
+            metadata = result.get('metadata', {})
+            doc_id = metadata.get('doc_id', result.get('doc_id', 'unknown'))
+            source_type = metadata.get('source_type', 'unknown')
+            author = metadata.get('author', metadata.get('creator', 'unknown'))
+            
+            unique_docs.add(doc_id)
+            unique_source_types.add(source_type)
+            unique_authors.add(author)
+            
+            doc_counts[doc_id] += 1
+            source_type_counts[source_type] += 1
+            author_counts[author] += 1
+        
+        # Calculate Shannon diversity index
+        total_results = len(results)
+        diversity_index = 0.0
+        
+        for count in doc_counts.values():
+            if count > 0:
+                proportion = count / total_results
+                diversity_index -= proportion * math.log2(proportion)
+        
+        # Normalize diversity index (0-1 scale)
+        max_diversity = math.log2(len(unique_docs)) if len(unique_docs) > 1 else 1.0
+        normalized_diversity = diversity_index / max_diversity if max_diversity > 0 else 0.0
+        
+        # Calculate coverage score (how well we cover different sources)
+        # Use a reasonable default for expected sources
+        expected_sources = max(total_results // 2, 1)
+        coverage_score = min(len(unique_docs) / expected_sources, 1.0) if results else 0.0
+        
+        return {
+            'unique_documents': len(unique_docs),
+            'unique_source_types': len(unique_source_types),
+            'unique_authors': len(unique_authors),
+            'document_distribution': dict(doc_counts),
+            'source_type_distribution': dict(source_type_counts),
+            'author_distribution': dict(author_counts),
+            'diversity_index': round(normalized_diversity, 3),
+            'coverage_score': round(coverage_score, 3),
+            'average_chunks_per_doc': round(total_results / len(unique_docs), 2) if unique_docs else 0.0,
+            'max_chunks_from_single_doc': max(doc_counts.values()) if doc_counts else 0
+        } 
