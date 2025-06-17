@@ -26,18 +26,18 @@ class DatabaseConfig:
 @dataclass
 class EmbeddingConfig:
     """Embedding model configuration"""
-    provider: str = "sentence-transformers"  # sentence-transformers, cohere
-    model_name: str = "sentence-transformers/all-MiniLM-L6-v2"
-    dimension: int = 384  # all-MiniLM-L6-v2 dimension
-    batch_size: int = 32
+    provider: str = "azure"  # sentence-transformers, cohere, azure
+    model_name: str = "Cohere-embed-v3-english"
+    dimension: int = 1024  # Cohere v3 dimension
+    batch_size: int = 96
     device: str = "cpu"
     api_key: Optional[str] = None
 
 @dataclass
 class LLMConfig:
     """LLM configuration"""
-    provider: str = "groq"  # groq, openai, cohere
-    model_name: str = "meta-llama/llama-4-maverick-17b-128e-instruct"
+    provider: str = "azure"  # groq, openai, cohere, azure
+    model_name: str = "Llama-4-Maverick-17B-128E-Instruct-FP8"
     api_key: Optional[str] = None
     temperature: float = 0.1
     max_tokens: int = 1000
@@ -221,12 +221,25 @@ class ConfigManager:
             # Also set for embedding if using Cohere
             if self.config.embedding.provider == 'cohere':
                 self.config.embedding.api_key = os.getenv('COHERE_API_KEY')
+        if os.getenv('AZURE_API_KEY'):
+            if self.config.llm.provider == 'azure':
+                self.config.llm.api_key = os.getenv('AZURE_API_KEY')
+            # Also set for embedding if using Azure
+            if self.config.embedding.provider == 'azure':
+                self.config.embedding.api_key = os.getenv('AZURE_API_KEY')
         
         # Embedding config
         if os.getenv('RAG_EMBEDDING_PROVIDER'):
             self.config.embedding.provider = os.getenv('RAG_EMBEDDING_PROVIDER')
         if os.getenv('RAG_EMBEDDING_MODEL'):
             self.config.embedding.model_name = os.getenv('RAG_EMBEDDING_MODEL')
+        
+        # Dynamically calculate embedding dimension based on provider and model
+        from .constants import get_embedding_dimension
+        self.config.embedding.dimension = get_embedding_dimension(
+            self.config.embedding.provider, 
+            self.config.embedding.model_name
+        )
         
         # API config
         if os.getenv('RAG_API_HOST'):

@@ -312,8 +312,45 @@ class FixedRAGUI:
             
             if response.status_code == 200:
                 data = response.json()
-                answer = data.get('response', '')  # Fixed: API returns 'response', not 'answer'
+                raw_answer = data.get('response', '')  # Fixed: API returns 'response', not 'answer'
                 sources = data.get('sources', [])
+                
+                # Store response data for feedback
+                response_id = data.get('response_id', '')
+                
+                # Add confidence information to the answer
+                confidence_score = data.get('confidence_score', 0.0)
+                confidence_level = data.get('confidence_level', 'unknown')
+                
+                # Confidence level emoji mapping
+                confidence_emoji = {
+                    'high': '🟢',
+                    'medium': '🟡', 
+                    'low': '🔴',
+                    'unknown': '⚪'
+                }
+                
+                # Format answer with confidence header and feedback prompt
+                if confidence_score > 0:
+                    confidence_header = f"{confidence_emoji.get(confidence_level, '⚪')} **Confidence: {confidence_score} ({confidence_level.upper()})**\n\n"
+                    answer = confidence_header + raw_answer
+                else:
+                    answer = raw_answer
+                
+                # Add feedback prompt
+                if response_id:
+                    feedback_prompt = f"\n\n---\n**Was this response helpful?** Please use the feedback buttons below to help us improve!\n*Response ID: {response_id[:8]}...*"
+                    answer += feedback_prompt
+                
+                # Store response data for feedback functionality
+                self.last_response_data = {
+                    'query': query,
+                    'response_id': response_id,
+                    'response_text': raw_answer,
+                    'confidence_score': confidence_score,
+                    'confidence_level': confidence_level,
+                    'sources_count': len(sources)
+                }
                 
                 # Format sources
                 if sources:
@@ -383,15 +420,37 @@ class FixedRAGUI:
                     sources_text = "❌ **No sources found for this query**"
                     lifecycle_analysis = "🔍 **No documents matched this query**"
                 
-                # Format metadata
+                # Format metadata with confidence scores
                 context_used = data.get('context_used', 0)
+                confidence_score = data.get('confidence_score', 0.0)
+                confidence_level = data.get('confidence_level', 'unknown')
+                
+                # Confidence level emoji mapping
+                confidence_emoji = {
+                    'high': '🟢',
+                    'medium': '🟡', 
+                    'low': '🔴',
+                    'unknown': '⚪'
+                }
+                
                 metadata = f"**Query Results Metadata:**\n"
                 metadata += f"- Query: `{query}`\n"
+                metadata += f"- {confidence_emoji.get(confidence_level, '⚪')} **Confidence Score:** {confidence_score} ({confidence_level.upper()})\n"
                 metadata += f"- Context chunks used: {context_used}\n"
                 metadata += f"- Max results requested: {max_results}\n"
                 metadata += f"- Sources found: {len(sources)}\n"
                 metadata += f"- Registry documents: {len(self.document_registry)}\n"
                 metadata += f"- Query timestamp: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+                
+                # Add confidence interpretation
+                if confidence_score > 0:
+                    metadata += f"\n**Confidence Interpretation:**\n"
+                    if confidence_level == 'high':
+                        metadata += f"🟢 **High Confidence:** Very reliable answer with strong source support\n"
+                    elif confidence_level == 'medium':
+                        metadata += f"🟡 **Medium Confidence:** Good answer but may need verification\n"
+                    elif confidence_level == 'low':
+                        metadata += f"🔴 **Low Confidence:** Uncertain answer, consider rephrasing query\n"
                 
                 return answer, sources_text, lifecycle_analysis
                 
@@ -408,6 +467,83 @@ class FixedRAGUI:
         except Exception as e:
             return f"❌ **Query Error:** {str(e)}", "", ""
     
+    def submit_feedback(self, helpful: bool, feedback_text: str = "") -> str:
+        """Submit feedback for the last query response"""
+        if not hasattr(self, 'last_response_data') or not self.last_response_data:
+            return "❌ No recent query to provide feedback for. Please run a query first."
+        
+        try:
+            feedback_payload = {
+                **self.last_response_data,
+                'helpful': helpful,
+                'feedback_text': feedback_text,
+                'user_id': 'ui_user',
+                'session_id': f"ui_session_{datetime.now().strftime('%Y%m%d')}"
+            }
+            
+            response = requests.post(f"{self.api_url}/feedback", json=feedback_payload, timeout=10)
+            
+            if response.status_code == 200:
+                result = response.json()
+                feedback_id = result.get('feedback_id', 'unknown')
+                
+                emoji = "👍" if helpful else "👎"
+                result_msg = f"{emoji} **Feedback Submitted Successfully!**\n"
+                result_msg += f"📝 **Feedback ID:** `{feedback_id[:8]}...`\n"
+                result_msg += f"🎯 **Rating:** {'Helpful' if helpful else 'Not Helpful'}\n"
+                
+                if feedback_text:
+                    result_msg += f"💬 **Comment:** {feedback_text}\n"
+                
+                result_msg += f"📅 **Submitted:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+                result_msg += f"\n✨ Thank you for helping us improve the system!"
+                
+                return result_msg
+            else:
+                return f"❌ **Feedback submission failed:** HTTP {response.status_code}"
+                
+        except Exception as e:
+            return f"❌ **Feedback Error:** {str(e)}"
+    
+    def get_feedback_stats(self) -> str:
+        """Get feedback statistics from the system"""
+        try:
+            response = requests.get(f"{self.api_url}/feedback/stats?days=30", timeout=10)
+            
+            if response.status_code == 200:
+                stats = response.json()
+                
+                total_feedback = stats.get('total_feedback', 0)
+                helpful_count = stats.get('helpful_count', 0)
+                unhelpful_count = stats.get('unhelpful_count', 0)
+                helpfulness_rate = stats.get('helpfulness_rate', 0)
+                avg_confidence = stats.get('avg_confidence', 0)
+                
+                result_msg = "📊 **Feedback Statistics (Last 30 Days)**\n\n"
+                result_msg += f"📝 **Total Feedback:** {total_feedback}\n"
+                result_msg += f"👍 **Helpful:** {helpful_count}\n"
+                result_msg += f"👎 **Not Helpful:** {unhelpful_count}\n"
+                result_msg += f"📈 **Helpfulness Rate:** {helpfulness_rate:.1%}\n"
+                result_msg += f"🎯 **Average Confidence:** {avg_confidence:.3f}\n"
+                
+                # Confidence breakdown
+                confidence_breakdown = stats.get('confidence_breakdown', [])
+                if confidence_breakdown:
+                    result_msg += f"\n**Confidence Level Breakdown:**\n"
+                    for level_stats in confidence_breakdown:
+                        level = level_stats.get('confidence_level', 'unknown')
+                        count = level_stats.get('count', 0)
+                        rate = level_stats.get('helpfulness_rate', 0)
+                        emoji = {'high': '🟢', 'medium': '🟡', 'low': '🔴'}.get(level, '⚪')
+                        result_msg += f"   {emoji} **{level.title()}:** {count} responses ({rate:.1%} helpful)\n"
+                
+                return result_msg
+            else:
+                return f"❌ **Failed to get feedback stats:** HTTP {response.status_code}"
+                
+        except Exception as e:
+            return f"❌ **Feedback Stats Error:** {str(e)}"
+
     def clear_vector_store(self) -> str:
         """Clear the entire vector store and index"""
         try:
@@ -458,7 +594,47 @@ class FixedRAGUI:
             return f"❌ Path is not a directory: {folder_path}"
         
         try:
-            # Add folder to backend monitoring
+            # First, check current monitoring status to see if folder is already being monitored
+            status_response = requests.get(f"{self.api_url}/folder-monitor/status", timeout=10)
+            
+            if status_response.status_code == 200:
+                status_data = status_response.json()
+                if status_data.get('success'):
+                    monitored_folders = status_data.get('status', {}).get('monitored_folders', [])
+                    
+                    # Check if folder is already being monitored (normalize paths for comparison)
+                    normalized_input = os.path.normpath(folder_path).lower()
+                    already_monitored = False
+                    
+                    for monitored_folder in monitored_folders:
+                        normalized_monitored = os.path.normpath(str(monitored_folder)).lower()
+                        if normalized_input == normalized_monitored:
+                            already_monitored = True
+                            break
+                    
+                    if already_monitored:
+                        # Folder is already being monitored, just ensure monitoring is started
+                        start_response = requests.post(f"{self.api_url}/folder-monitor/start", timeout=10)
+                        
+                        result = f"ℹ️ **Folder Already Being Monitored**\n\n"
+                        result += f"📁 **Folder Path:** `{folder_path}`\n"
+                        result += f"📅 **Status Check:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+                        
+                        if start_response.status_code == 200:
+                            start_data = start_response.json()
+                            if start_data.get('success'):
+                                result += f"🟢 **Monitoring Status:** Active\n"
+                                result += f"📁 **Total Folders Monitored:** {len(monitored_folders)}\n"
+                            else:
+                                result += f"⚠️ **Monitoring Status:** {start_data.get('error', 'Unknown status')}\n"
+                        else:
+                            result += f"⚠️ **Monitoring Status:** Could not verify (HTTP {start_response.status_code})\n"
+                        
+                        result += f"\n💡 **Note:** This folder is already in the monitoring list. Backend will continue to monitor it automatically."
+                        
+                        return result
+            
+            # Folder is not being monitored, proceed to add it
             response = requests.post(
                 f"{self.api_url}/folder-monitor/add",
                 json={"folder_path": folder_path},
@@ -494,11 +670,22 @@ class FixedRAGUI:
                     
                     return result
                 else:
-                    return f"❌ Failed to add folder: {data.get('error', 'Unknown error')}"
+                    error_msg = data.get('error', 'Unknown error')
+                    
+                    # Handle specific error cases
+                    if "already being monitored" in error_msg.lower():
+                        return f"ℹ️ **Folder Already Being Monitored**\n\n📁 **Path:** `{folder_path}`\n\n💡 This folder is already in the monitoring list. No action needed."
+                    else:
+                        return f"❌ Failed to add folder: {error_msg}"
             else:
                 try:
                     error_detail = response.json().get('detail', 'Unknown error')
-                    return f"❌ HTTP {response.status_code}: {error_detail}"
+                    
+                    # Handle HTTP 400 specifically for already monitored folders
+                    if response.status_code == 400 and "already being monitored" in error_detail.lower():
+                        return f"ℹ️ **Folder Already Being Monitored**\n\n📁 **Path:** `{folder_path}`\n\n💡 This folder is already in the monitoring list. Monitoring will continue automatically."
+                    else:
+                        return f"❌ HTTP {response.status_code}: {error_detail}"
                 except:
                     return f"❌ HTTP {response.status_code}: {response.text[:200]}"
         except Exception as e:
@@ -557,14 +744,23 @@ class FixedRAGUI:
                     
                     status_text += f"**🔄 Auto-Ingest:** {'✅ Enabled' if status_data.get('auto_ingest', False) else '❌ Disabled'}\n"
                     
-                    # Add folder list
+                    # Add folder list with more detail
                     folders = status_data.get('monitored_folders', [])
                     if folders:
-                        status_text += f"\n## 📋 Monitored Folders\n\n"
+                        status_text += f"\n## 📋 Currently Monitored Folders\n\n"
                         for i, folder in enumerate(folders, 1):
-                            status_text += f"{i}. `{folder}`\n"
+                            # Normalize path display
+                            display_path = os.path.normpath(str(folder))
+                            status_text += f"{i}. `{display_path}`\n"
+                            
+                            # Add existence check
+                            if os.path.exists(display_path):
+                                status_text += f"   ✅ Folder exists and accessible\n"
+                            else:
+                                status_text += f"   ❌ Folder not found or inaccessible\n"
                     else:
-                        status_text += f"\n## 📋 Monitored Folders\n\n❌ No folders are currently being monitored"
+                        status_text += f"\n## 📋 Monitored Folders\n\n❌ No folders are currently being monitored\n"
+                        status_text += f"💡 Add a folder using the input field above."
                     
                     return status_text
                 else:
@@ -1343,7 +1539,7 @@ def create_fixed_interface():
                         # Main Upload/Update Section
                         file_input = gr.File(
                             label="📁 Select File to Upload/Update",
-                            file_types=[".txt", ".pdf", ".docx", ".md", ".json", ".csv"],
+                            file_types=[".txt", ".pdf", ".docx", ".doc", ".md", ".json", ".csv", ".xlsx", ".xls", ".xlsm", ".xlsb"],
                             type="filepath"
                         )
                         
@@ -1458,6 +1654,43 @@ def create_fixed_interface():
                 
                 query_lifecycle_analysis = gr.Markdown(
                     label="🔍 Document Lifecycle Analysis"
+                )
+                
+                # Feedback Section
+                gr.Markdown("---")
+                gr.Markdown("### 👍👎 Response Feedback")
+                gr.Markdown("**Help us improve by rating the response quality:**")
+                
+                with gr.Row():
+                    with gr.Column(scale=1):
+                        feedback_helpful_btn = gr.Button("👍 Helpful", variant="primary", size="sm")
+                        feedback_not_helpful_btn = gr.Button("👎 Not Helpful", variant="stop", size="sm")
+                    
+                    with gr.Column(scale=2):
+                        feedback_text_input = gr.Textbox(
+                            label="💬 Additional Comments (Optional)",
+                            placeholder="Tell us what was good or what could be improved...",
+                            lines=2,
+                            max_lines=3
+                        )
+                
+                feedback_result = gr.Markdown(
+                    label="Feedback Status",
+                    value="",
+                    visible=False
+                )
+                
+                # Feedback Statistics Section
+                gr.Markdown("---")
+                gr.Markdown("### 📊 Feedback Statistics")
+                
+                with gr.Row():
+                    get_feedback_stats_btn = gr.Button("📊 View Feedback Stats", variant="secondary", size="sm")
+                
+                feedback_stats_display = gr.Markdown(
+                    label="System Feedback Statistics",
+                    value="Click 'View Feedback Stats' to see system performance metrics...",
+                    visible=True
                 )
             
             # Document Overview Tab
@@ -1583,17 +1816,25 @@ def create_fixed_interface():
                         monitor_folder_input = gr.Textbox(
                             label="📁 Folder Path to Monitor",
                             placeholder="e.g., C:\\Documents\\MyDocs or /home/user/documents",
-                            info="Enter the full path to the folder you want to monitor"
+                            info="Enter the full path to the folder you want to monitor. If already monitored, status will be confirmed."
                         )
                         
                         with gr.Row():
-                            start_monitor_btn = gr.Button("🟢 Start Monitoring", variant="primary")
+                            start_monitor_btn = gr.Button("🟢 Start/Resume Monitoring", variant="primary")
                             stop_monitor_btn = gr.Button("🛑 Stop Monitoring", variant="stop")
                             status_refresh_btn = gr.Button("🔄 Refresh Status", variant="secondary")
                         
+                        gr.Markdown("""
+                        **💡 How to use:**
+                        1. **Enter folder path** (must exist and be accessible)
+                        2. **Click "Start/Resume Monitoring"** (safe to click even if already monitored)
+                        3. **Check status** to see if monitoring is active
+                        4. **Add/modify files** in the folder to test auto-ingestion
+                        """)
+                        
                         monitor_result = gr.Markdown(
                             label="Monitoring Result",
-                            value="📴 **Monitoring Status:** Not started"
+                            value="📴 **Monitoring Status:** Ready to start monitoring. Enter a folder path above."
                         )
                     
                     with gr.Column(scale=1):
@@ -1608,7 +1849,8 @@ def create_fixed_interface():
                         gr.Markdown("""
                         - 📄 **Text files**: .txt, .md
                         - 📊 **Data files**: .json, .csv
-                        - 📖 **Documents**: .pdf, .docx
+                        - 📖 **Documents**: .pdf, .docx, .doc
+                        - 📊 **Excel files**: .xlsx, .xls, .xlsm, .xlsb
                         
                         #### 🔄 How It Works
                         1. **Start monitoring** a folder
@@ -2065,7 +2307,7 @@ def create_fixed_interface():
                 5. **Use Different Content**: Make files easily distinguishable for testing
                 6. **ServiceNow Integration**: Use filters to find relevant tickets before ingesting
                 7. **Folder Monitoring**: Use absolute paths, monitor console for real-time logs
-                8. **File Types**: Stick to supported formats (.txt, .md, .pdf, .docx, .json, .csv)
+                                        8. **File Types**: Stick to supported formats (.txt, .md, .pdf, .docx, .doc, .json, .csv, .xlsx, .xls, .xlsm, .xlsb)
 
                 ---
 
@@ -2181,8 +2423,43 @@ def create_fixed_interface():
             outputs=[query_answer, query_sources, query_lifecycle_analysis]
         )
         
+        # Feedback event handlers
+        def submit_helpful_feedback(feedback_text):
+            result = ui.submit_feedback(helpful=True, feedback_text=feedback_text)
+            return gr.update(visible=True, value=result), ""  # Clear feedback text after submission
+        
+        def submit_not_helpful_feedback(feedback_text):
+            result = ui.submit_feedback(helpful=False, feedback_text=feedback_text)
+            return gr.update(visible=True, value=result), ""  # Clear feedback text after submission
+        
+        feedback_helpful_btn.click(
+            fn=submit_helpful_feedback,
+            inputs=[feedback_text_input],
+            outputs=[feedback_result, feedback_text_input]
+        )
+        
+        feedback_not_helpful_btn.click(
+            fn=submit_not_helpful_feedback,
+            inputs=[feedback_text_input],
+            outputs=[feedback_result, feedback_text_input]
+        )
+        
+        get_feedback_stats_btn.click(
+            fn=ui.get_feedback_stats,
+            outputs=[feedback_stats_display]
+        )
+        
         # Folder monitoring event handlers
         def start_monitoring_and_refresh(folder_path):
+            # Validate input before proceeding
+            if not folder_path or not folder_path.strip():
+                return (
+                    "❌ **Please enter a folder path**\n\nExample: `C:\\Documents\\MyFolder` or `/home/user/documents`",
+                    ui.get_monitoring_status(),
+                    ui._format_document_registry(),
+                    gr.update(choices=ui.get_document_paths(), value=None)
+                )
+            
             result = ui.start_folder_monitoring(folder_path)
             status = ui.get_monitoring_status()
             registry = ui._format_document_registry()
@@ -2427,12 +2704,40 @@ Ready to launch! Press Ctrl+C to stop the UI
 """)
     
     print("DEBUG: About to launch interface on port 7869")
-    interface.launch(
-        server_name="0.0.0.0",
-        server_port=7869,  # Changed port to avoid conflict
-        share=False,
-        show_error=True
-    )
+    try:
+        # Try with specific port first
+        interface.launch(
+            server_port=7869,
+            share=False,
+            show_error=True,
+            inbrowser=True,
+            prevent_thread_lock=False
+        )
+    except ValueError as ve:
+        print(f"❌ ValueError on port 7869: {ve}")
+        print("🔄 Trying with auto port selection...")
+        try:
+            interface.launch(
+                share=False,
+                show_error=True,
+                inbrowser=True,
+                prevent_thread_lock=False
+            )
+        except Exception as e2:
+            print(f"❌ Auto port launch failed: {e2}")
+            print("🔧 Trying minimal launch configuration...")
+            try:
+                interface.launch(
+                    show_error=True
+                )
+            except Exception as e3:
+                print(f"❌ All launch attempts failed: {e3}")
+                print("💡 Please try running: gradio --version")
+                print("💡 Or try: pip install --upgrade gradio")
+    except Exception as e:
+        print(f"❌ Unexpected error: {e}")
+        print("🔄 Trying basic launch...")
+        interface.launch()
 
 if __name__ == "__main__":
     main()

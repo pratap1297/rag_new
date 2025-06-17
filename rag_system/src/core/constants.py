@@ -15,6 +15,13 @@ EMBEDDING_DIMENSIONS = {
         'embed-multilingual-v3.0': 1024,
         'embed-english-light-v3.0': 384,
     },
+    'azure': {
+        'Cohere-embed-v3-english': 1024,
+        'Cohere-embed-v3-multilingual': 1024,
+        'text-embedding-ada-002': 1536,
+        'text-embedding-3-small': 1536,
+        'text-embedding-3-large': 3072,
+    },
     'openai': {
         'text-embedding-ada-002': 1536,
         'text-embedding-3-small': 1536,
@@ -30,6 +37,10 @@ DEFAULT_EMBEDDING_CONFIG = {
     },
     'cohere': {
         'model': 'embed-english-v3.0',
+        'dimension': 1024
+    },
+    'azure': {
+        'model': 'Cohere-embed-v3-english',
         'dimension': 1024
     },
     'openai': {
