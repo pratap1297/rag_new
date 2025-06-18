@@ -436,15 +436,9 @@ class ConversationNodes:
         if state.get('query_engine_response') and state['query_engine_response'].strip():
             query_response = state['query_engine_response'].strip()
             
-            # Check if the query engine provided a clear, complete answer
-            # Look for patterns that indicate a complete answer (like "The final answer is:")
-            if any(phrase in query_response.lower() for phrase in [
-                'the final answer is:', 
-                'the answer is:', 
-                'incident:', 
-                'manager:', 
-                'certifications:'
-            ]):
+            # Check if the query engine provided a substantive answer
+            # If the response is longer than 50 chars and contains useful content, use it
+            if len(query_response) > 50 and not query_response.lower().startswith('i don\'t have'):
                 self.logger.info("Using query engine's direct answer")
                 return query_response
         
