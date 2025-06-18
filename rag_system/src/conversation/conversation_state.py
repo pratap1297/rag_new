@@ -65,6 +65,7 @@ class ConversationState(TypedDict):
     
     # Response generation
     generated_response: str
+    query_engine_response: str
     response_confidence: float
     requires_clarification: bool
     clarification_questions: List[str]
@@ -115,6 +116,7 @@ def create_conversation_state(session_id: Optional[str] = None) -> ConversationS
         
         # Response generation
         generated_response="",
+        query_engine_response="",
         response_confidence=0.0,
         requires_clarification=False,
         clarification_questions=[],

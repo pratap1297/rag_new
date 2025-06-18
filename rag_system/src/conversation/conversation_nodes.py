@@ -115,6 +115,7 @@ class ConversationNodes:
             new_state['topics_discussed'] = new_topics[-10:]  # Keep only recent topics
         
         self.logger.info(f"Intent: {new_state['user_intent']}, Keywords: {keywords}")
+        self.logger.info(f"Current phase after intent: {new_state['current_phase']}")
         return new_state
     
     def search_knowledge(self, state: ConversationState) -> ConversationState:
@@ -136,6 +137,7 @@ class ConversationNodes:
         try:
             # Enhance query with conversation context
             enhanced_query = self._enhance_query_with_context(state)
+            self.logger.info(f"Enhanced query: '{enhanced_query}' (original: '{state['processed_query']}')")
             
             # Perform search using query engine
             search_result = self.query_engine.process_query(
@@ -146,46 +148,60 @@ class ConversationNodes:
             # Debug: Log what we got from the search
             self.logger.info(f"Search result keys: {list(search_result.keys()) if search_result else 'None'}")
             if search_result:
-                sources_count = len(search_result.get('sources', [])) if search_result.get('sources') else 0
-                self.logger.info(f"Sources count: {sources_count}")
-            
-            # Process search results - check if we have a valid search result
-            if search_result and 'response' in search_result:
-                # Use the response from the query engine directly
-                new_state['generated_response'] = search_result['response']
-                new_state['relevant_sources'] = search_result.get('sources', [])
-                new_state['context_chunks'] = []
-                new_state['search_results'] = []
-                
-                # Store the original search result for later use
-                new_state['original_search_result'] = search_result
-                
-                # Process sources if available
                 sources = search_result.get('sources', [])
-                if sources:
-                    search_results = []
-                    context_chunks = []
-                    for source in sources:
-                        search_res = SearchResult(
-                            content=source.get('text', ''),
-                            score=source.get('similarity_score', source.get('score', 0)),
-                            source=source.get('metadata', {}).get('filename', 'unknown'),
-                            metadata=source.get('metadata', {})
-                        )
-                        search_results.append(search_res)
-                        
-                        # Add to context chunks
-                        if search_res['content']:
-                            context_chunks.append(search_res['content'])
+                sources_count = len(sources) if sources else 0
+                self.logger.info(f"Sources count: {sources_count}")
+                self.logger.info(f"Total sources in result: {search_result.get('total_sources', 'N/A')}")
+                self.logger.info(f"Confidence score: {search_result.get('confidence_score', 'N/A')}")
+                if sources_count > 0:
+                    self.logger.info(f"First source keys: {list(sources[0].keys()) if sources[0] else 'None'}")
+                    self.logger.info(f"First source metadata: {sources[0].get('metadata', {})}")
+                    self.logger.info(f"First source text preview: {sources[0].get('text', '')[:200]}...")
+                else:
+                    self.logger.info("No sources in result - checking response content")
+                    response_text = search_result.get('response', '')
+                    self.logger.info(f"Response text length: {len(response_text)}")
+                    self.logger.info(f"Response preview: {response_text[:100]}...")
+            else:
+                self.logger.info("Search result is None")
+            
+            # Process search results - check if we have sources
+            if search_result and search_result.get('sources'):
+                # Extract sources and context properly
+                sources = search_result.get('sources', [])
+                search_results = []
+                context_chunks = []
+                
+                self.logger.info(f"Processing {len(sources)} sources from search result")
+                
+                for i, source in enumerate(sources):
+                    self.logger.info(f"Source {i+1}: filename={source.get('metadata', {}).get('filename', 'Unknown')}")
+                    self.logger.info(f"Source {i+1}: text preview={source.get('text', '')[:100]}...")
                     
-                    new_state['search_results'] = search_results
-                    new_state['context_chunks'] = context_chunks
+                    search_res = SearchResult(
+                        content=source.get('text', ''),
+                        score=source.get('similarity_score', source.get('score', 0)),
+                        source=source.get('metadata', {}).get('filename', 'unknown'),
+                        metadata=source.get('metadata', {})
+                    )
+                    search_results.append(search_res)
+                    
+                    # Add to context chunks
+                    if search_res['content']:
+                        context_chunks.append(search_res['content'])
+                
+                new_state['search_results'] = search_results
+                new_state['context_chunks'] = context_chunks
+                new_state['relevant_sources'] = sources
+                
+                # Store the query engine response separately (if available)
+                new_state['query_engine_response'] = search_result.get('response', '')
                 
                 new_state['current_phase'] = ConversationPhase.RESPONDING
-                self.logger.info(f"Using query engine response with {len(new_state['search_results'])} sources from original result")
+                self.logger.info(f"Found {len(search_results)} relevant sources")
             else:
-                # No valid search result
-                self.logger.info("No valid search result received, will generate fallback response")
+                # No results found
+                self.logger.info("No search results found")
                 new_state['current_phase'] = ConversationPhase.RESPONDING
                 new_state['requires_clarification'] = False
                 new_state['search_results'] = []
@@ -217,11 +233,8 @@ class ConversationNodes:
             elif state['user_intent'] == "help":
                 response = self._generate_help_response(state)
             else:
-                # Use existing response from search if available, otherwise generate new one
-                if state.get('generated_response'):
-                    response = state['generated_response']
-                else:
-                    response = self._generate_contextual_response(state)
+                # Generate contextual response based on search results
+                response = self._generate_contextual_response(state)
             
             # Add response to conversation
             new_state = add_message_to_state(new_state, MessageType.ASSISTANT, response)
@@ -282,18 +295,21 @@ class ConversationNodes:
         """Enhance query with conversation context"""
         base_query = state['processed_query']
         
-        # Add context from recent topics
-        if state['topics_discussed']:
-            recent_topics = state['topics_discussed'][-3:]
-            context = f"Context: {', '.join(recent_topics)}. Query: {base_query}"
-            return context
-        
+        # For now, just return the base query without enhancement
+        # This fixes the search issue where enhanced queries weren't finding results
         return base_query
     
     def _generate_contextual_response(self, state: ConversationState) -> str:
         """Generate response based on search results and context"""
         
+        # First check if we have a response from the query engine - this contains the best answer
+        if state.get('query_engine_response') and state['query_engine_response'].strip():
+            self.logger.info("Using query engine response (highest priority)")
+            return state['query_engine_response']
+        
+        # If no query engine response, try to generate response using search results
         if state.get('search_results') and state['search_results']:
+            self.logger.info("Generating response from search results")
             # Use search results to generate response
             context_text = "\n".join([result['content'][:500] for result in state['search_results'][:3]])
             
@@ -306,12 +322,13 @@ Please provide a clear, informative response based on the context provided."""
             
             try:
                 if self.llm_client:
-                    response = self.llm_client.generate_response(prompt)
-                    return response
+                    response = self.llm_client.generate(prompt)
+                    return response.strip()
             except Exception as e:
                 self.logger.error(f"LLM generation failed: {e}")
         
-        # Fallback response when no search results or LLM fails
+        # Final fallback response when no search results or LLM fails
+        self.logger.info("Using general response fallback")
         return self._generate_general_response(state)
     
     def _generate_greeting_response(self, state: ConversationState) -> str:
