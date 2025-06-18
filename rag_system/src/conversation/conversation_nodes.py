@@ -431,16 +431,10 @@ class ConversationNodes:
     def _generate_contextual_response(self, state: ConversationState) -> str:
         """Generate response based on search results and context"""
         
-        # First, check if we have a direct answer from the query engine
-        # This is important for queries that need specific data correlation
+        # Check if we have a response from the query engine - use it directly
         if state.get('query_engine_response') and state['query_engine_response'].strip():
-            query_response = state['query_engine_response'].strip()
-            
-            # Check if the query engine provided a substantive answer
-            # If the response is longer than 50 chars and contains useful content, use it
-            if len(query_response) > 50 and not query_response.lower().startswith('i don\'t have'):
-                self.logger.info("Using query engine's direct answer")
-                return query_response
+            self.logger.info("Using query engine response directly")
+            return state['query_engine_response']
         
         # Check if this is a contextual query that needs conversation awareness
         if state.get('is_contextual', False):
