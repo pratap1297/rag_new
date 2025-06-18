@@ -462,22 +462,22 @@ class ConversationNodes:
                 
                 prompt = f"""You are having a conversation with a user. Here is the recent conversation:
 
-{conversation_context}
+    {conversation_context}
 
-The user's latest question is: "{state['original_query']}"
+    The user's latest question is: "{state['original_query']}"
 
-Based on the following information from the knowledge base, provide a helpful response:
+    Based on the following information from the knowledge base, provide a helpful response:
 
-{context_text}
+    {context_text}
 
-Important instructions:
-- This is a follow-up question in an ongoing conversation
-- Consider what has already been discussed and provide NEW or ADDITIONAL information
-- If the user is asking for "more" information, provide details that weren't mentioned before
-- If the information requested isn't available in the knowledge base, acknowledge this clearly
-- Be conversational and reference the previous discussion naturally
+    Important instructions:
+    - This is a follow-up question in an ongoing conversation
+    - Consider what has already been discussed and provide NEW or ADDITIONAL information
+    - If the user is asking for "more" information, provide details that weren't mentioned before
+    - If the information requested isn't available in the knowledge base, acknowledge this clearly
+    - Be conversational and reference the previous discussion naturally
 
-Response:"""
+    Response:"""
                 
                 try:
                     if self.llm_client:
@@ -505,20 +505,20 @@ Response:"""
                 
                 prompt = f"""You need to answer a complex query that requires correlating information from multiple sources.
 
-Query: "{state['original_query']}"
+    Query: "{state['original_query']}"
 
-Available Information:
-{context_text}
+    Available Information:
+    {context_text}
 
-Instructions:
-1. Identify all the pieces of information needed to answer the query
-2. Extract relevant data from the provided context
-3. Connect the information logically
-4. Provide a clear, concise final answer
+    Instructions:
+    1. Identify all the pieces of information needed to answer the query
+    2. Extract relevant data from the provided context
+    3. Connect the information logically
+    4. Provide a clear, concise final answer
 
-If you can find all the required information, format your response with "The final answer is:" followed by the specific details requested.
+    If you can find all the required information, format your response with "The final answer is:" followed by the specific details requested.
 
-Response:"""
+    Response:"""
                 
                 try:
                     if self.llm_client:
@@ -532,10 +532,10 @@ Response:"""
                 
                 prompt = f"""Based on the following information, provide a helpful response to the user's query: "{state['original_query']}"
 
-Context:
-{context_text}
+    Context:
+    {context_text}
 
-Please provide a clear, informative response based on the context provided."""
+    Please provide a clear, informative response based on the context provided."""
                 
                 try:
                     if self.llm_client:
@@ -635,6 +635,68 @@ Could you provide more details about what specifically you'd like to know? This 
             questions.append(f"How does {topic} relate to your specific needs?")
         
         return questions[:3]  # Return max 3 questions
+    
+    def _extract_related_topics(self, state: ConversationState) -> List[str]:
+        """Extract related topics from search results and conversation context"""
+        
+        related_topics = []
+        
+        # Extract topics from search results
+        if state.get('search_results'):
+            for result in state['search_results'][:3]:  # Top 3 results
+                content = result.get('content', '')
+                
+                # Extract specific topics based on content patterns
+                if 'building' in content.lower():
+                    # Extract building references
+                    building_matches = re.findall(r'building\s+([a-zA-Z0-9]+)', content, re.IGNORECASE)
+                    for match in building_matches:
+                        related_topics.append(f"Building {match.upper()}")
+                
+                if 'cisco' in content.lower():
+                    # Extract Cisco model references
+                    cisco_matches = re.findall(r'cisco\s+(\w+)', content, re.IGNORECASE)
+                    for match in cisco_matches:
+                        if match not in ['access', 'point', 'points']:
+                            related_topics.append(f"Cisco {match}")
+                
+                if 'access point' in content.lower() or 'ap' in content.lower():
+                    related_topics.append("Access Points")
+                
+                if 'employee' in content.lower():
+                    related_topics.append("Employee Records")
+                
+                if 'incident' in content.lower():
+                    related_topics.append("Incidents")
+                
+                if 'certification' in content.lower():
+                    related_topics.append("Certifications")
+                
+                if 'manager' in content.lower():
+                    related_topics.append("Management")
+        
+        # Extract topics from current query
+        query = state.get('original_query', '').lower()
+        if 'antenna' in query:
+            related_topics.append("External Antennas")
+        if 'model' in query:
+            related_topics.append("Equipment Models")
+        if 'specification' in query:
+            related_topics.append("Technical Specifications")
+        
+        # Add topics from conversation history
+        if state.get('topics_discussed'):
+            related_topics.extend(state['topics_discussed'][-3:])  # Last 3 topics
+        
+        # Remove duplicates and limit to 5 topics
+        unique_topics = []
+        seen = set()
+        for topic in related_topics:
+            if topic.lower() not in seen:
+                unique_topics.append(topic)
+                seen.add(topic.lower())
+        
+        return unique_topics[:5]
     
     def _is_complex_correlation_query(self, query: str) -> bool:
         """Determine if a query requires complex data correlation"""
