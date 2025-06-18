@@ -1,5 +1,5 @@
 """
-Query Engine
+Query Engine - Enhanced with Conversation Context
 Main engine for processing user queries and generating responses
 """
 import logging
@@ -11,7 +11,7 @@ import math
 from ..core.error_handling import RetrievalError
 
 class QueryEngine:
-    """Main query processing engine"""
+    """Main query processing engine with conversation awareness"""
     
     def __init__(self, faiss_store, embedder, llm_client, metadata_store, config_manager, reranker=None, query_enhancer=None):
         self.faiss_store = faiss_store
@@ -32,11 +32,32 @@ class QueryEngine:
         logging.info(f"Source diversity enabled: {self.enable_source_diversity}, weight: {self.diversity_weight}")
     
     def process_query(self, query: str, filters: Dict[str, Any] = None, 
-                     top_k: int = None) -> Dict[str, Any]:
-        """Process a user query and return response with sources"""
+                     top_k: int = None, conversation_context: Dict[str, Any] = None) -> Dict[str, Any]:
+        """
+        Process a user query and return response with sources
+        
+        Args:
+            query: The user's query
+            filters: Optional filters for search
+            top_k: Number of top results to return
+            conversation_context: Optional conversation context containing:
+                - conversation_history: List of recent messages
+                - current_topic: Current topic being discussed
+                - is_contextual: Whether this is a follow-up query
+                - original_query: The original unenhanced query (for contextual queries)
+        """
         top_k = top_k or self.config.retrieval.top_k
         
         try:
+            # Handle conversation context if provided
+            if conversation_context and conversation_context.get('is_contextual', False):
+                logging.info(f"Processing contextual query with conversation awareness")
+                # For contextual queries, we might need to adjust the search strategy
+                # but keep the original query for response generation
+                original_query = conversation_context.get('original_query', query)
+            else:
+                original_query = query
+            
             # Enhance query if enhancer is available
             enhanced_query = None
             query_variants = [(query, 1.0)]  # Default: original query with max confidence
@@ -76,7 +97,7 @@ class QueryEngine:
             search_results = self._merge_search_results(all_results)
             
             if not search_results:
-                return self._create_empty_response(query)
+                return self._create_empty_response(original_query)
             
             # Filter by similarity threshold
             filtered_results = [
@@ -85,7 +106,7 @@ class QueryEngine:
             ]
             
             if not filtered_results:
-                return self._create_empty_response(query)
+                return self._create_empty_response(original_query)
             
             # Apply reranking if enabled and available
             if self.reranker and self.config.retrieval.enable_reranking:
@@ -106,8 +127,12 @@ class QueryEngine:
             else:
                 top_results = pre_diversity_results[:top_k]
             
-            # Generate response using LLM
-            response = self._generate_llm_response(query, top_results)
+            # Generate response using LLM with conversation context
+            response = self._generate_llm_response(
+                original_query, 
+                top_results, 
+                conversation_context
+            )
             
             # Calculate confidence score (now includes diversity metrics)
             confidence = self._calculate_confidence(top_results)
@@ -117,7 +142,7 @@ class QueryEngine:
             
             # Prepare response with enhancement info
             response_data = {
-                'query': query,
+                'query': original_query,
                 'response': response,
                 'confidence_score': confidence,
                 'confidence_level': 'high' if confidence > 0.8 else 'medium' if confidence > 0.5 else 'low',
@@ -143,8 +168,10 @@ class QueryEngine:
         except Exception as e:
             raise RetrievalError(f"Query processing failed: {e}", query=query)
     
-    def _generate_llm_response(self, query: str, sources: List[Dict[str, Any]]) -> str:
-        """Generate response using LLM with retrieved sources"""
+    def _generate_llm_response(self, query: str, sources: List[Dict[str, Any]], 
+                              conversation_context: Optional[Dict[str, Any]] = None) -> str:
+        """Generate response using LLM with retrieved sources and conversation context"""
+        
         # Build context from sources
         context_parts = []
         for i, source in enumerate(sources[:5]):  # Use top 5 sources
@@ -153,8 +180,46 @@ class QueryEngine:
         
         context = "\n\n".join(context_parts)
         
-        # Create prompt
-        prompt = f"""Based on the following context, answer the user's question. If the context doesn't contain enough information to answer the question, say so clearly.
+        # Build conversation history if provided
+        conversation_history = ""
+        if conversation_context and conversation_context.get('conversation_history'):
+            history_lines = []
+            for msg in conversation_context['conversation_history'][-6:]:  # Last 3 exchanges
+                role = msg.get('role', 'User')
+                content = msg.get('content', '')
+                if len(content) > 200:
+                    content = content[:200] + "..."
+                history_lines.append(f"{role}: {content}")
+            conversation_history = "\n".join(history_lines)
+        
+        # Check if this is a contextual query
+        is_contextual = conversation_context and conversation_context.get('is_contextual', False)
+        
+        # Create appropriate prompt based on context
+        if is_contextual and conversation_history:
+            # Contextual query with conversation history
+            prompt = f"""You are having a conversation with a user. Here is the recent conversation:
+
+{conversation_history}
+
+The user's latest question is: "{query}"
+
+Based on the following context from the knowledge base, provide a helpful response:
+
+Context:
+{context}
+
+Important instructions:
+- This is a follow-up question in an ongoing conversation
+- Consider what has already been discussed and provide NEW or ADDITIONAL information if asked
+- If the user is asking for "more" information, focus on details not mentioned before
+- If the context doesn't contain additional information beyond what was discussed, acknowledge this
+- Be conversational and natural
+
+Answer:"""
+        else:
+            # Standard query without conversation context
+            prompt = f"""Based on the following context, answer the user's question. If the context doesn't contain enough information to answer the question, say so clearly.
 
 Context:
 {context}
@@ -168,6 +233,8 @@ Answer:"""
         except Exception as e:
             logging.error(f"LLM generation failed: {e}")
             return "I apologize, but I'm unable to generate a response at the moment due to a technical issue."
+    
+    # ... rest of the existing methods remain the same ...
     
     def _format_sources(self, sources: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """Format sources for response"""
@@ -200,6 +267,7 @@ Answer:"""
             'timestamp': datetime.now().isoformat()
         }
     
+
     def _merge_search_results(self, all_results: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """Merge and deduplicate search results from multiple query variants"""
         if not all_results:

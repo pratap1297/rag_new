@@ -56,6 +56,11 @@ class ConversationState(TypedDict):
     processed_query: str
     query_keywords: List[str]
     search_filters: Dict[str, Any]
+    is_contextual: bool  # Added to track contextual queries
+    
+    # Topic tracking
+    current_topic: Optional[str]  # Added for topic tracking
+    topic_entities: List[str]  # Added for entity tracking
     
     # Search and retrieval results
     search_results: List[SearchResult]
@@ -107,6 +112,11 @@ def create_conversation_state(session_id: Optional[str] = None) -> ConversationS
         processed_query="",
         query_keywords=[],
         search_filters={},
+        is_contextual=False,
+        
+        # Topic tracking
+        current_topic=None,
+        topic_entities=[],
         
         # Search and retrieval results
         search_results=[],
@@ -185,4 +195,4 @@ def should_end_conversation(state: ConversationState) -> bool:
         any("goodbye" in msg['content'].lower() or "bye" in msg['content'].lower() 
             for msg in state['messages'][-2:] if msg['type'] == MessageType.USER) or
         state['current_phase'] == ConversationPhase.ENDING
-    ) 
+    )

@@ -66,7 +66,26 @@ class ConversationNodes:
         # Create new state with updated values
         new_state = state.copy()
         new_state['original_query'] = user_input
-        new_state['processed_query'] = user_input
+        
+        # Check if this is a contextual query that needs context
+        if self._is_contextual_query(user_input, state):
+            # Enhance query with conversation context
+            enhanced_query = self._build_contextual_query(user_input, state)
+            new_state['processed_query'] = enhanced_query
+            new_state['is_contextual'] = True
+            self.logger.info(f"Contextual query detected. Enhanced: '{enhanced_query}'")
+        else:
+            new_state['processed_query'] = user_input
+            new_state['is_contextual'] = False
+        
+        # Track topic entities
+        if 'building' in user_input.lower():
+            match = re.search(r'building\s+([a-zA-Z0-9]+)', user_input, re.IGNORECASE)
+            if match:
+                new_state['current_topic'] = f"Building {match.group(1).upper()}"
+                topic_entities = new_state.get('topic_entities', [])
+                topic_entities.append(f"Building {match.group(1).upper()}")
+                new_state['topic_entities'] = topic_entities[-5:]  # Keep last 5 entities
         
         # Extract intent patterns
         intent_patterns = {
@@ -76,7 +95,9 @@ class ConversationNodes:
             "comparison": [r"\b(compare|versus|vs|difference|better)\b"],
             "explanation": [r"\b(explain|tell me about|describe)\b"],
             "help": [r"\b(help|assist|support)\b"],
-            "goodbye": [r"\b(bye|goodbye|see you|farewell)\b"]
+            "goodbye": [r"\b(bye|goodbye|see you|farewell)\b"],
+            "clarification": [r"\b(what was|repeat|again|previous)\b"],
+            "follow_up": [r"\b(more|also|additionally|furthermore|tell me more)\b"]
         }
         
         detected_intents = []
@@ -93,12 +114,14 @@ class ConversationNodes:
         elif "greeting" in detected_intents and state['turn_count'] <= 2:
             new_state['user_intent'] = "greeting"
             new_state['current_phase'] = ConversationPhase.GREETING
+        elif "clarification" in detected_intents:
+            new_state['user_intent'] = "clarification"
+            new_state['current_phase'] = ConversationPhase.SEARCHING
         elif "help" in detected_intents:
             new_state['user_intent'] = "help"
             new_state['current_phase'] = ConversationPhase.RESPONDING
         else:
             # For any other query (including general statements), treat as information seeking
-            # This ensures we always try to search the knowledge base first
             new_state['user_intent'] = "information_seeking"
             new_state['current_phase'] = ConversationPhase.SEARCHING
         
@@ -116,6 +139,7 @@ class ConversationNodes:
         
         self.logger.info(f"Intent: {new_state['user_intent']}, Keywords: {keywords}")
         self.logger.info(f"Current phase after intent: {new_state['current_phase']}")
+        self.logger.info(f"Is contextual: {new_state.get('is_contextual', False)}")
         return new_state
     
     def search_knowledge(self, state: ConversationState) -> ConversationState:
@@ -127,7 +151,6 @@ class ConversationNodes:
         if not state['processed_query'] or not self.query_engine:
             new_state['has_errors'] = True
             new_state['error_messages'] = state['error_messages'] + ["No query to search or query engine unavailable"]
-            # Set up for response generation even when query engine is unavailable
             new_state['current_phase'] = ConversationPhase.RESPONDING
             new_state['requires_clarification'] = False
             new_state['search_results'] = []
@@ -135,39 +158,53 @@ class ConversationNodes:
             return new_state
         
         try:
-            # Enhance query with conversation context
-            enhanced_query = self._enhance_query_with_context(state)
-            self.logger.info(f"Enhanced query: '{enhanced_query}' (original: '{state['processed_query']}')")
+            search_result = None
             
-            # Perform search using query engine
-            search_result = self.query_engine.process_query(
-                enhanced_query,
-                top_k=5
-            )
-            
-            # Debug: Log what we got from the search
-            self.logger.info(f"Search result keys: {list(search_result.keys()) if search_result else 'None'}")
-            if search_result:
-                sources = search_result.get('sources', [])
-                sources_count = len(sources) if sources else 0
-                self.logger.info(f"Sources count: {sources_count}")
-                self.logger.info(f"Total sources in result: {search_result.get('total_sources', 'N/A')}")
-                self.logger.info(f"Confidence score: {search_result.get('confidence_score', 'N/A')}")
-                if sources_count > 0:
-                    self.logger.info(f"First source keys: {list(sources[0].keys()) if sources[0] else 'None'}")
-                    self.logger.info(f"First source metadata: {sources[0].get('metadata', {})}")
-                    self.logger.info(f"First source text preview: {sources[0].get('text', '')[:200]}...")
-                else:
-                    self.logger.info("No sources in result - checking response content")
-                    response_text = search_result.get('response', '')
-                    self.logger.info(f"Response text length: {len(response_text)}")
-                    self.logger.info(f"Response preview: {response_text[:100]}...")
+            # For contextual queries, try multiple search strategies
+            if state.get('is_contextual', False):
+                self.logger.info("Handling contextual query with multiple search strategies")
+                
+                # Strategy 1: Try with enhanced query
+                self.logger.info(f"Search strategy 1: Enhanced query: '{state['processed_query']}'")
+                search_result = self.query_engine.process_query(
+                    state['processed_query'],
+                    top_k=5
+                )
+                
+                # Strategy 2: If no good results, try with original query
+                if not search_result or not search_result.get('sources') or len(search_result.get('sources', [])) < 2:
+                    self.logger.info(f"Search strategy 2: Original query: '{state['original_query']}'")
+                    search_result = self.query_engine.process_query(
+                        state['original_query'],
+                        top_k=5
+                    )
+                
+                # Strategy 3: If still no results, try searching for the main topic
+                if not search_result or not search_result.get('sources'):
+                    # Extract main topic (e.g., "building A" from "tell me more about building A")
+                    topic_match = re.search(r'about\s+(.+)', state['original_query'].lower())
+                    if topic_match:
+                        topic = topic_match.group(1).strip()
+                        self.logger.info(f"Search strategy 3: Main topic: '{topic}'")
+                        search_result = self.query_engine.process_query(topic, top_k=5)
+                    
+                    # Also try with stored topic entities
+                    if (not search_result or not search_result.get('sources')) and state.get('topic_entities'):
+                        for entity in state['topic_entities'][::-1]:  # Try most recent first
+                            self.logger.info(f"Search strategy 4: Topic entity: '{entity}'")
+                            search_result = self.query_engine.process_query(entity, top_k=5)
+                            if search_result and search_result.get('sources'):
+                                break
             else:
-                self.logger.info("Search result is None")
+                # Non-contextual query - proceed as normal
+                self.logger.info(f"Non-contextual search: '{state['processed_query']}'")
+                search_result = self.query_engine.process_query(
+                    state['processed_query'],
+                    top_k=5
+                )
             
-            # Process search results - check if we have sources
+            # Process search results
             if search_result and search_result.get('sources'):
-                # Extract sources and context properly
                 sources = search_result.get('sources', [])
                 search_results = []
                 context_chunks = []
@@ -283,53 +320,259 @@ class ConversationNodes:
         
         return new_state
     
+    def _is_contextual_query(self, query: str, state: ConversationState) -> bool:
+        """Determine if a query needs context from previous messages"""
+        query_lower = query.lower()
+        
+        # Patterns that indicate contextual queries
+        contextual_patterns = [
+            r'^(tell me more|more about|what about|how about)',
+            r'^(more information|additional information|additional details)',
+            r'^(just|only|specifically)',
+            r'^(list|show|give me)',
+            r'(that|this|those|these|it|them)',
+            r'^(for floor|on floor|in floor)',
+            r'^(yes|no|correct|right)',
+            r'(previous|earlier|before)',
+            r'^(and |also |additionally)',
+            r'^(what else|anything else)',
+            r'^(continue|go on)'
+        ]
+        
+        for pattern in contextual_patterns:
+            if re.search(pattern, query_lower):
+                self.logger.info(f"Contextual pattern matched: {pattern}")
+                return True
+        
+        # Check if query is very short and likely refers to previous context
+        if len(query.split()) <= 4 and state['turn_count'] > 1:
+            self.logger.info("Short query detected with conversation history - treating as contextual")
+            return True
+        
+        return False
+    
+    def _build_contextual_query(self, current_query: str, state: ConversationState) -> str:
+        """Build a query that includes context from previous messages"""
+        self.logger.info(f"Building contextual query from: '{current_query}'")
+        
+        # Get recent conversation history
+        recent_messages = state['messages'][-4:]  # Last 2 exchanges
+        
+        # Extract the main topic from recent messages
+        context_parts = []
+        previous_topics = []
+        
+        for msg in recent_messages:
+            if msg['type'] == MessageType.USER:
+                # Store the actual content for context
+                previous_topics.append(msg['content'])
+                
+                # Look for specific topics mentioned
+                if 'building' in msg['content'].lower():
+                    match = re.search(r'building\s+([a-zA-Z0-9]+)', msg['content'], re.IGNORECASE)
+                    if match:
+                        context_parts.append(f"Building {match.group(1).upper()}")
+                
+                if 'access point' in msg['content'].lower() or 'ap' in msg['content'].lower():
+                    context_parts.append("access points")
+                    
+            elif msg['type'] == MessageType.ASSISTANT:
+                # Extract topics from assistant responses too
+                if 'cisco' in msg['content'].lower():
+                    context_parts.append("Cisco access points")
+                if '3802' in msg['content']:
+                    context_parts.append("Cisco 3802I 3802E")
+                if '1562' in msg['content']:
+                    context_parts.append("Cisco 1562E")
+        
+        # For "tell me more" type queries, we need to enhance differently
+        if re.search(r'^(tell me more|more about|what else)', current_query.lower()):
+            # Find what topic they're asking more about
+            topic_match = re.search(r'about\s+(.+)', current_query.lower())
+            if topic_match:
+                topic = topic_match.group(1).strip()
+                # If they're asking about a topic we've discussed, search for more details
+                if context_parts:
+                    # Create a comprehensive search query
+                    enhanced = f"{topic} {' '.join(context_parts)} details specifications features"
+                else:
+                    enhanced = f"{topic} detailed information"
+            else:
+                # General "tell me more" - use all context
+                enhanced = f"additional information about {' '.join(context_parts)}"
+        elif current_query.lower().startswith(('just list', 'only list', 'list')):
+            # Handle list requests with context
+            context_str = " ".join(set(context_parts))  # Remove duplicates
+            if 'floor' in current_query.lower() and any('building' in part.lower() for part in context_parts):
+                # "Just list for Floor 1" -> "Building A Floor 1 access points list"
+                enhanced = f"{context_str} {current_query}"
+            else:
+                enhanced = f"{current_query} for {context_str}"
+        elif len(current_query.split()) <= 4 and context_parts:
+            # Short query - add full context
+            context_str = " ".join(set(context_parts))
+            enhanced = f"{current_query} {context_str}"
+        else:
+            # Other contextual queries
+            context_str = " ".join(set(context_parts))  # Remove duplicates
+            enhanced = f"{current_query} (context: {context_str})"
+        
+        self.logger.info(f"Enhanced query to: '{enhanced}'")
+        return enhanced
+    
     def _extract_keywords(self, text: str) -> List[str]:
         """Extract keywords from text"""
         # Simple keyword extraction - remove common words
-        common_words = {'the', 'a', 'an', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for', 'of', 'with', 'by', 'is', 'are', 'was', 'were', 'be', 'been', 'have', 'has', 'had', 'do', 'does', 'did', 'will', 'would', 'could', 'should', 'may', 'might', 'can', 'cannot', 'how', 'what', 'when', 'where', 'why', 'who'}
+        common_words = {'the', 'a', 'an', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for', 'of', 'with', 'by', 'is', 'are', 'was', 'were', 'be', 'been', 'have', 'has', 'had', 'do', 'does', 'did', 'will', 'would', 'could', 'should', 'may', 'might', 'can', 'cannot', 'how', 'what', 'when', 'where', 'why', 'who', 'tell', 'me', 'about', 'more'}
         words = re.findall(r'\b\w+\b', text.lower())
         keywords = [word for word in words if len(word) > 2 and word not in common_words]
         return keywords[:10]  # Return top 10 keywords
     
-    def _enhance_query_with_context(self, state: ConversationState) -> str:
-        """Enhance query with conversation context"""
-        base_query = state['processed_query']
-        
-        # For now, just return the base query without enhancement
-        # This fixes the search issue where enhanced queries weren't finding results
-        return base_query
-    
     def _generate_contextual_response(self, state: ConversationState) -> str:
         """Generate response based on search results and context"""
         
-        # First check if we have a response from the query engine - this contains the best answer
+        # First, check if we have a direct answer from the query engine
+        # This is important for queries that need specific data correlation
         if state.get('query_engine_response') and state['query_engine_response'].strip():
-            self.logger.info("Using query engine response (highest priority)")
+            query_response = state['query_engine_response'].strip()
+            
+            # Check if the query engine provided a clear, complete answer
+            # Look for patterns that indicate a complete answer (like "The final answer is:")
+            if any(phrase in query_response.lower() for phrase in [
+                'the final answer is:', 
+                'the answer is:', 
+                'incident:', 
+                'manager:', 
+                'certifications:'
+            ]):
+                self.logger.info("Using query engine's direct answer")
+                return query_response
+        
+        # Check if this is a contextual query that needs conversation awareness
+        if state.get('is_contextual', False):
+            self.logger.info("Generating context-aware response")
+            
+            # Build conversation history for context
+            conversation_context = self._build_conversation_context(state)
+            
+            # If we have search results, use them with conversation context
+            if state.get('search_results') and state['search_results']:
+                # Get search results context
+                context_text = "\n\n".join([result['content'] for result in state['search_results'][:3]])
+                
+                prompt = f"""You are having a conversation with a user. Here is the recent conversation:
+
+{conversation_context}
+
+The user's latest question is: "{state['original_query']}"
+
+Based on the following information from the knowledge base, provide a helpful response:
+
+{context_text}
+
+Important instructions:
+- This is a follow-up question in an ongoing conversation
+- Consider what has already been discussed and provide NEW or ADDITIONAL information
+- If the user is asking for "more" information, provide details that weren't mentioned before
+- If the information requested isn't available in the knowledge base, acknowledge this clearly
+- Be conversational and reference the previous discussion naturally
+
+Response:"""
+                
+                try:
+                    if self.llm_client:
+                        response = self.llm_client.generate(prompt, max_tokens=500, temperature=0.7)
+                        return response.strip()
+                except Exception as e:
+                    self.logger.error(f"LLM generation failed: {e}")
+            else:
+                # No search results for contextual query
+                return self._generate_no_results_contextual_response(state)
+        
+        # For non-contextual queries, check if we have a query engine response
+        if state.get('query_engine_response') and state['query_engine_response'].strip():
+            self.logger.info("Using query engine response (non-contextual query)")
             return state['query_engine_response']
         
-        # If no query engine response, try to generate response using search results
+        # If no query engine response, try to generate from search results
         if state.get('search_results') and state['search_results']:
             self.logger.info("Generating response from search results")
-            # Use search results to generate response
-            context_text = "\n".join([result['content'][:500] for result in state['search_results'][:3]])
             
-            prompt = f"""Based on the following information, provide a helpful response to the user's query: "{state['original_query']}"
+            # Check if this is a complex query requiring data correlation
+            if self._is_complex_correlation_query(state['original_query']):
+                # For complex queries, use a more structured prompt
+                context_text = "\n\n".join([result['content'] for result in state['search_results']])
+                
+                prompt = f"""You need to answer a complex query that requires correlating information from multiple sources.
+
+Query: "{state['original_query']}"
+
+Available Information:
+{context_text}
+
+Instructions:
+1. Identify all the pieces of information needed to answer the query
+2. Extract relevant data from the provided context
+3. Connect the information logically
+4. Provide a clear, concise final answer
+
+If you can find all the required information, format your response with "The final answer is:" followed by the specific details requested.
+
+Response:"""
+                
+                try:
+                    if self.llm_client:
+                        response = self.llm_client.generate(prompt, max_tokens=500, temperature=0.1)  # Lower temperature for factual queries
+                        return response.strip()
+                except Exception as e:
+                    self.logger.error(f"LLM generation failed: {e}")
+            else:
+                # Standard response generation
+                context_text = "\n".join([result['content'][:500] for result in state['search_results'][:3]])
+                
+                prompt = f"""Based on the following information, provide a helpful response to the user's query: "{state['original_query']}"
 
 Context:
 {context_text}
 
 Please provide a clear, informative response based on the context provided."""
-            
-            try:
-                if self.llm_client:
-                    response = self.llm_client.generate(prompt)
-                    return response.strip()
-            except Exception as e:
-                self.logger.error(f"LLM generation failed: {e}")
+                
+                try:
+                    if self.llm_client:
+                        response = self.llm_client.generate(prompt)
+                        return response.strip()
+                except Exception as e:
+                    self.logger.error(f"LLM generation failed: {e}")
         
-        # Final fallback response when no search results or LLM fails
+        # Final fallback response
         self.logger.info("Using general response fallback")
         return self._generate_general_response(state)
+    
+    def _build_conversation_context(self, state: ConversationState) -> str:
+        """Build a summary of the conversation for context"""
+        recent_messages = state['messages'][-6:]  # Last 3 exchanges
+        
+        context_lines = []
+        for msg in recent_messages:
+            role = "User" if msg['type'] == MessageType.USER else "Assistant"
+            # Truncate long messages
+            content = msg['content']
+            if len(content) > 200:
+                content = content[:200] + "..."
+            context_lines.append(f"{role}: {content}")
+        
+        return "\n".join(context_lines)
+    
+    def _generate_no_results_contextual_response(self, state: ConversationState) -> str:
+        """Generate response when no results found for contextual query"""
+        # Get the topic from conversation
+        topic = state.get('current_topic', 'that topic')
+        
+        # Check what the user is asking for
+        if 'tell me more' in state['original_query'].lower():
+            return f"I've shared the information I have about {topic} from the knowledge base. I don't have additional details beyond what was already provided. Is there something specific about {topic} you'd like to know more about?"
+        else:
+            return f"I couldn't find additional information about {state['original_query']} in the knowledge base. Could you please be more specific about what aspect you'd like to know?"
     
     def _generate_greeting_response(self, state: ConversationState) -> str:
         """Generate greeting response"""
@@ -393,17 +636,32 @@ Could you provide more details about what specifically you'd like to know? This 
         
         return questions[:3]  # Return max 3 questions
     
-    def _extract_related_topics(self, state: ConversationState) -> List[str]:
-        """Extract related topics from search results"""
+    def _is_complex_correlation_query(self, query: str) -> bool:
+        """Determine if a query requires complex data correlation"""
+        query_lower = query.lower()
         
-        if not state.get('search_results'):
-            return []
+        # Patterns that indicate complex correlation queries
+        complex_patterns = [
+            r'find.+then.+identify',  # Find X then identify Y
+            r'find.+and.+list',        # Find X and list Y
+            r'identify.+associated.+with',  # Identify X associated with Y
+            r'match.+with.+from',      # Match X with Y from Z
+            r'correlate',              # Explicit correlation request
+            r'cross-reference',        # Cross-reference request
+            r'link.+to.+and',         # Link X to Y and Z
+            r'which.+has.+and.+also'  # Which X has Y and also Z
+        ]
         
-        # Simple topic extraction from search results
-        topics = set()
-        for result in state['search_results'][:3]:
-            # Extract potential topics from content
-            content_words = re.findall(r'\b[A-Z][a-z]+\b', result['content'])
-            topics.update(content_words[:2])  # Add up to 2 topics per result
+        for pattern in complex_patterns:
+            if re.search(pattern, query_lower):
+                return True
         
-        return list(topics)[:5]  # Return max 5 related topics 
+        # Check for multi-step queries
+        if all(word in query_lower for word in ['find', 'then', 'list']):
+            return True
+        
+        # Check for queries asking for multiple related pieces of information
+        if query_lower.count('and') >= 2 and any(word in query_lower for word in ['identify', 'list', 'find']):
+            return True
+        
+        return False

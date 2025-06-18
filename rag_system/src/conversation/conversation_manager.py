@@ -163,6 +163,7 @@ class ConversationManager:
             'turn_count': state['turn_count'],
             'current_phase': state['current_phase'].value,
             'confidence_score': state['response_confidence'],
+            'confidence': state['response_confidence'],  # Add alias for compatibility
             'timestamp': datetime.now().isoformat()
         }
         
@@ -182,6 +183,9 @@ class ConversationManager:
                 }
                 for result in state['search_results'][:3]
             ]
+            response['total_sources'] = len(state['search_results'])
+        else:
+            response['total_sources'] = 0
         
         if state['has_errors']:
             response['errors'] = state['error_messages']

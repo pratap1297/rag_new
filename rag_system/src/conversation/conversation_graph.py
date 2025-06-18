@@ -92,15 +92,17 @@ class ConversationGraph:
             user_intent = state.get('user_intent', 'general')
             turn_count = state.get('turn_count', 0)
             
+            self.logger.info(f"Routing after understanding - intent: {user_intent}, turn: {turn_count}")
+            
             if user_intent == "goodbye":
                 return "end"
             elif user_intent in ["greeting", "help"]:
                 return "respond"
             elif user_intent == "information_seeking":
-                # Always search for information seeking queries
                 return "search"
             else:
-                return "respond"
+                # For questions about specific topics, route to search
+                return "search"  # Changed from "respond" to "search"
         except Exception as e:
             self.logger.error(f"Error in routing after understanding: {e}")
             return "respond"
