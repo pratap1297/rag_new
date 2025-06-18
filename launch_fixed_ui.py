@@ -1577,15 +1577,15 @@ The LangGraph conversation system is not currently available. This could be due 
             error_history = [{"role": "assistant", "content": f"Error: {str(e)}"}]
             return error_history, "", f"❌ Error starting conversation: {str(e)}"
     
-    def send_conversation_message(self, message: str, session_id: str, history: List[Dict[str, str]]) -> Tuple[str, List[Dict[str, str]], str]:
-        """Send a message in the conversation"""
+    def send_conversation_message(self, message: str, session_id: str, history: List[Dict[str, str]]) -> Tuple[str, List[Dict[str, str]], str, Dict[str, Any]]:
+        """Send a message in the conversation with enhanced suggestions"""
         if not message.strip():
-            return "", history, "Please enter a message"
+            return "", history, "Please enter a message", {}
         
         if not session_id or session_id == "No session":
             history.append({"role": "user", "content": message})
             history.append({"role": "assistant", "content": "Please start a new conversation first"})
-            return "", history, "No active session"
+            return "", history, "No active session", {}
         
         try:
             # Add user message to history
@@ -1615,21 +1615,118 @@ The LangGraph conversation system is not currently available. This could be due 
                 
                 session_info = " | ".join(info_parts) if info_parts else "Active conversation"
                 
-                return "", history, f"✅ {session_info}"
+                # Extract enhanced response data for UI
+                enhanced_data = self._extract_enhanced_response_data(data)
+                
+                return "", history, f"✅ {session_info}", enhanced_data
             elif response.status_code == 404:
                 error_msg = "🚧 Conversation API not available. Please use the Query Testing tab for Q&A functionality."
                 history.append({"role": "assistant", "content": error_msg})
-                return "", history, "❌ Conversation API not available (404)"
+                return "", history, "❌ Conversation API not available (404)", {}
             else:
                 history.append({"role": "assistant", "content": f"Error: {response.status_code}"})
-                return "", history, f"❌ API Error: {response.status_code}"
+                return "", history, f"❌ API Error: {response.status_code}", {}
                 
         except requests.exceptions.RequestException as e:
             history.append({"role": "assistant", "content": f"Connection error: {str(e)}"})
-            return "", history, f"❌ Connection error: {str(e)}"
+            return "", history, f"❌ Connection error: {str(e)}", {}
         except Exception as e:
             history.append({"role": "assistant", "content": f"Error: {str(e)}"})
-            return "", history, f"❌ Error: {str(e)}"
+            return "", history, f"❌ Error: {str(e)}", {}
+    
+    def _extract_enhanced_response_data(self, response_data: Dict[str, Any]) -> Dict[str, Any]:
+        """Extract enhanced response data for UI elements"""
+        enhanced = {
+            'suggestions': [],
+            'topics': [],
+            'entities': [],
+            'technical_terms': [],
+            'insights': {},
+            'hints': []
+        }
+        
+        # Handle case where response_data is None or empty
+        if not response_data:
+            return enhanced
+        
+        # Extract suggestions with fallback
+        suggested_questions = response_data.get('suggested_questions', [])
+        if suggested_questions:
+            # Handle both list of dicts and list of strings
+            processed_suggestions = []
+            for suggestion in suggested_questions[:4]:
+                if isinstance(suggestion, dict):
+                    processed_suggestions.append(suggestion)
+                elif isinstance(suggestion, str):
+                    # Convert string to dict format
+                    processed_suggestions.append({
+                        'question': suggestion,
+                        'icon': '💬',
+                        'priority': 0.5,
+                        'has_quick_answer': False
+                    })
+            enhanced['suggestions'] = processed_suggestions
+        
+        # Extract exploration data with fallback
+        explore_more = response_data.get('explore_more', {})
+        if explore_more:
+            # Handle topics
+            topics = explore_more.get('topics', [])
+            processed_topics = []
+            for topic in topics[:6]:
+                if isinstance(topic, dict):
+                    processed_topics.append(topic.get('name', str(topic)))
+                else:
+                    processed_topics.append(str(topic))
+            enhanced['topics'] = processed_topics
+            
+            # Handle entities
+            entities = explore_more.get('entities', [])
+            enhanced['entities'] = entities[:4]
+            
+            # Handle technical terms
+            technical_terms = explore_more.get('technical_terms', [])
+            enhanced['technical_terms'] = technical_terms[:3]
+        
+        # Extract conversation insights with fallback
+        conversation_insights = response_data.get('conversation_insights', {})
+        if conversation_insights:
+            enhanced['insights'] = {
+                'topic_continuity': conversation_insights.get('topic_continuity', 0),
+                'information_coverage': conversation_insights.get('information_coverage', 'unknown'),
+                'exploration_path': conversation_insights.get('suggested_exploration_path', [])
+            }
+        
+        # Generate interaction hints
+        enhanced['hints'] = self._generate_interaction_hints(response_data)
+        
+        return enhanced
+    
+    def _generate_interaction_hints(self, response_data: Dict[str, Any]) -> List[str]:
+        """Generate helpful interaction hints based on response"""
+        hints = []
+        
+        # Based on suggestions available
+        if response_data.get('suggested_questions'):
+            hints.append("💡 Click the suggestion buttons below for quick follow-up questions")
+        
+        # Based on sources found
+        sources_count = response_data.get('total_sources', 0)
+        if sources_count > 0:
+            hints.append(f"📚 Found {sources_count} relevant sources - ask for more details or examples")
+        
+        # Based on exploration topics
+        if response_data.get('explore_more', {}).get('topics'):
+            hints.append("🔍 Click topic chips to explore related areas in depth")
+        
+        # Based on confidence
+        confidence = response_data.get('confidence_score', 0)
+        if confidence < 0.6:
+            hints.append("🎯 Try rephrasing your question or asking for clarification")
+        elif confidence > 0.8:
+            hints.append("✅ High confidence response - consider exploring related topics")
+        
+        return hints[:3]  # Limit to 3 hints
     
     def end_conversation(self, session_id: str) -> Tuple[List[Dict[str, str]], str, str]:
         """End the current conversation"""
@@ -1696,6 +1793,125 @@ def create_fixed_interface():
     .status-success { color: #28a745; font-weight: bold; }
     .status-error { color: #dc3545; font-weight: bold; }
     .status-warning { color: #ffc107; font-weight: bold; }
+    
+    /* Enhanced conversation styles */
+    .conversation-suggestions {
+        background: linear-gradient(135deg, #f8f9fa 0%, #e9ecef 100%);
+        border-radius: 12px;
+        padding: 16px;
+        margin: 8px 0;
+        border: 1px solid #dee2e6;
+    }
+    
+    .suggestion-button {
+        background: linear-gradient(135deg, #007bff 0%, #0056b3 100%);
+        border: none;
+        border-radius: 8px;
+        color: white;
+        padding: 8px 16px;
+        margin: 4px;
+        font-size: 14px;
+        cursor: pointer;
+        transition: all 0.3s ease;
+        box-shadow: 0 2px 4px rgba(0,123,255,0.2);
+    }
+    
+    .suggestion-button:hover {
+        transform: translateY(-2px);
+        box-shadow: 0 4px 8px rgba(0,123,255,0.3);
+    }
+    
+    .topic-chip {
+        background: linear-gradient(135deg, #28a745 0%, #20c997 100%);
+        border: none;
+        border-radius: 20px;
+        color: white;
+        padding: 6px 12px;
+        margin: 3px;
+        font-size: 12px;
+        cursor: pointer;
+        transition: all 0.3s ease;
+        box-shadow: 0 2px 4px rgba(40,167,69,0.2);
+    }
+    
+    .topic-chip:hover {
+        transform: scale(1.05);
+        box-shadow: 0 3px 6px rgba(40,167,69,0.3);
+    }
+    
+    .conversation-insights {
+        background: linear-gradient(135deg, #fff3cd 0%, #ffeaa7 100%);
+        border-radius: 8px;
+        padding: 12px;
+        margin: 8px 0;
+        border-left: 4px solid #ffc107;
+    }
+    
+    .entity-card {
+        background: linear-gradient(135deg, #d1ecf1 0%, #bee5eb 100%);
+        border-radius: 8px;
+        padding: 10px;
+        margin: 6px 0;
+        border-left: 3px solid #17a2b8;
+    }
+    
+    .technical-term {
+        background: linear-gradient(135deg, #f8d7da 0%, #f5c6cb 100%);
+        border-radius: 6px;
+        padding: 8px;
+        margin: 4px 0;
+        border-left: 3px solid #dc3545;
+        font-family: 'Courier New', monospace;
+    }
+    
+    .interaction-hint {
+        background: linear-gradient(135deg, #d4edda 0%, #c3e6cb 100%);
+        border-radius: 6px;
+        padding: 8px 12px;
+        margin: 4px 0;
+        border-left: 3px solid #28a745;
+        font-size: 14px;
+    }
+    
+    .debug-panel {
+        background: #f8f9fa;
+        border: 1px solid #dee2e6;
+        border-radius: 6px;
+        padding: 10px;
+        font-family: 'Courier New', monospace;
+        font-size: 12px;
+        max-height: 300px;
+        overflow-y: auto;
+    }
+    
+    /* Animation for suggestion updates */
+    @keyframes fadeInUp {
+        from {
+            opacity: 0;
+            transform: translateY(20px);
+        }
+        to {
+            opacity: 1;
+            transform: translateY(0);
+        }
+    }
+    
+    .suggestion-container {
+        animation: fadeInUp 0.5s ease-out;
+    }
+    
+    /* Responsive design */
+    @media (max-width: 768px) {
+        .suggestion-button {
+            font-size: 12px;
+            padding: 6px 12px;
+        }
+        
+        .topic-chip {
+            font-size: 10px;
+            padding: 4px 8px;
+        }
+    }
     """
     
     with gr.Blocks(css=css, title="RAG System - Fixed Document Lifecycle") as interface:
@@ -2345,98 +2561,169 @@ def create_fixed_interface():
 
             # Conversation Chat Tab
             with gr.Tab("💬 Conversation Chat"):
-                gr.Markdown("### 🤖 LangGraph Conversational Chat")
+                gr.Markdown("### 🤖 Enhanced Conversational Chat with Smart Suggestions")
                 gr.Markdown("""
                 **Engage in intelligent conversations with your RAG system:**
                 - 🧠 **Multi-turn conversations** with context retention
                 - 🔍 **Knowledge-based responses** using your document database
-                - 💡 **Follow-up suggestions** and related topics
+                - 💡 **Smart follow-up suggestions** with one-click responses
+                - 🎯 **Topic exploration** with interactive chips
                 - 📊 **Conversation analytics** and session management
+                - ⚡ **Quick actions** and contextual hints
                 """)
                 
                 with gr.Row():
-                    with gr.Column(scale=3):
+                    with gr.Column(scale=2):
                         # Main conversation area
                         chatbot = gr.Chatbot(
-                            label="Conversation",
-                            height=500,
+                            label="💬 Conversation",
+                            height=400,
                             show_label=True,
                             container=True,
-                            type="messages"
+                            type="messages",
+                            show_copy_button=True
                         )
                         
+                        # Message input area
                         with gr.Row():
                             message_input = gr.Textbox(
                                 placeholder="Type your message here... Press Enter to send",
                                 label="Your Message",
                                 lines=2,
-                                scale=4
+                                scale=4,
+                                show_copy_button=False
                             )
                             send_button = gr.Button("📤 Send", variant="primary", scale=1)
                         
+                        # Enhanced suggestion area
+                        with gr.Group():
+                            gr.Markdown("### 💡 Smart Suggestions")
+                            
+                            # Quick suggestion buttons
+                            with gr.Row():
+                                suggestion_btn_1 = gr.Button("", variant="secondary", visible=False, scale=1)
+                                suggestion_btn_2 = gr.Button("", variant="secondary", visible=False, scale=1)
+                                suggestion_btn_3 = gr.Button("", variant="secondary", visible=False, scale=1)
+                                suggestion_btn_4 = gr.Button("", variant="secondary", visible=False, scale=1)
+                            
+                            # Topic exploration chips
+                            with gr.Row():
+                                gr.Markdown("**🔍 Explore Topics:**")
+                            
+                            with gr.Row():
+                                topic_chip_1 = gr.Button("", variant="outline", visible=False, size="sm")
+                                topic_chip_2 = gr.Button("", variant="outline", visible=False, size="sm")
+                                topic_chip_3 = gr.Button("", variant="outline", visible=False, size="sm")
+                                topic_chip_4 = gr.Button("", variant="outline", visible=False, size="sm")
+                                topic_chip_5 = gr.Button("", variant="outline", visible=False, size="sm")
+                                topic_chip_6 = gr.Button("", variant="outline", visible=False, size="sm")
+                        
+                        # Conversation controls
                         with gr.Row():
-                            start_conversation_btn = gr.Button("🆕 Start New Conversation", variant="secondary")
+                            start_conversation_btn = gr.Button("🆕 Start New Conversation", variant="primary")
                             end_conversation_btn = gr.Button("🔚 End Conversation", variant="stop")
-                            refresh_conversation_btn = gr.Button("🔄 Refresh Status", variant="secondary")
+                            clear_suggestions_btn = gr.Button("🧹 Clear Suggestions", variant="secondary", size="sm")
                     
                     with gr.Column(scale=1):
-                        # Session information
-                        gr.Markdown("#### ℹ️ Session Info")
+                        # Enhanced session information
+                        with gr.Group():
+                            gr.Markdown("#### ℹ️ Session Info")
+                            
+                            session_id_display = gr.Textbox(
+                                label="Session ID",
+                                value="No session",
+                                interactive=False,
+                                max_lines=1
+                            )
+                            
+                            conversation_status = gr.Markdown(
+                                label="Conversation Status",
+                                value="No active conversation"
+                            )
+                            
+                            # Conversation insights
+                            conversation_insights = gr.Markdown(
+                                label="💡 Conversation Insights",
+                                value="",
+                                visible=False
+                            )
                         
-                        session_id_display = gr.Textbox(
-                            label="Session ID",
-                            value="No session",
-                            interactive=False,
-                            max_lines=1
-                        )
+                        # Interactive hints and guidance
+                        with gr.Group():
+                            gr.Markdown("#### 🎯 Interactive Hints")
+                            
+                            interaction_hints = gr.Markdown(
+                                label="Current Hints",
+                                value="💡 Start a conversation to see personalized hints and suggestions!"
+                            )
+                            
+                            # Entity exploration
+                            entity_exploration = gr.Markdown(
+                                label="👥 Entities to Explore",
+                                value="",
+                                visible=False
+                            )
+                            
+                            # Technical terms
+                            technical_terms = gr.Markdown(
+                                label="🔧 Technical Terms",
+                                value="",
+                                visible=False
+                            )
                         
-                        conversation_status = gr.Markdown(
-                            label="Conversation Status",
-                            value="No active conversation"
-                        )
+                        # Enhanced how-to guide
+                        with gr.Group():
+                            gr.Markdown("#### 🚀 Enhanced Features")
+                            gr.Markdown("""
+                            **Smart Suggestions:**
+                            - 💡 **One-click questions**: Generated based on context
+                            - ⚡ **Quick responses**: Pre-computed answers for common follow-ups
+                            - 🎯 **Prioritized suggestions**: Most relevant questions first
+                            - 🔍 **Context-aware**: Suggestions adapt to conversation flow
+                            
+                            **Topic Exploration:**
+                            - 🏷️ **Topic chips**: Click to explore related areas
+                            - 👥 **Entity cards**: Discover people, places, products
+                            - 🔧 **Technical terms**: Get definitions and explanations
+                            - 📊 **Related areas**: Find connected topics
+                            
+                            **Conversation Intelligence:**
+                            - 📈 **Conversation health**: Real-time quality assessment
+                            - 🎯 **Exploration paths**: Suggested conversation directions
+                            - 💬 **Context retention**: Maintains conversation memory
+                            - 📊 **Turn analytics**: Track conversation depth and coverage
+                            """)
                         
-                        gr.Markdown("---")
+                        # Advanced tips
+                        with gr.Group():
+                            gr.Markdown("#### 💡 Pro Tips")
+                            gr.Markdown("""
+                            **Getting Better Suggestions:**
+                            - Ask specific questions about your documents
+                            - Use natural, conversational language
+                            - Build on previous responses for deeper insights
+                            - Click suggestion buttons for instant follow-ups
+                            
+                            **Topic Exploration:**
+                            - Click topic chips to dive deeper
+                            - Explore entities mentioned in responses
+                            - Ask about technical terms for definitions
+                            - Follow suggested exploration paths
+                            
+                            **Conversation Flow:**
+                            - Start with broad questions, then get specific
+                            - Use clarification suggestions when confused
+                            - Explore related topics for comprehensive understanding
+                            - End conversations when you have what you need
+                            """)
                         
-                        gr.Markdown("#### 💡 How to Use")
-                        gr.Markdown("""
-                        **Getting Started:**
-                        1. Click "🆕 Start New Conversation"
-                        2. Type your message in the text box
-                        3. Press Enter or click "📤 Send"
-                        4. Continue the conversation naturally
-                        5. Click "🔚 End Conversation" when done
-                        
-                        **Features:**
-                        - 🧠 **Context Aware**: Remembers previous messages
-                        - 🔍 **Knowledge Search**: Finds relevant documents
-                        - 💡 **Smart Suggestions**: Offers follow-up questions
-                        - 📊 **Session Tracking**: Monitors conversation flow
-                        
-                        **Tips:**
-                        - Ask specific questions about your documents
-                        - Build on previous responses
-                        - Use natural language
-                        - Try follow-up questions for deeper insights
-                        """)
-                        
-                        gr.Markdown("---")
-                        
-                        gr.Markdown("#### 🔧 Conversation Features")
-                        gr.Markdown("""
-                        **LangGraph Integration:**
-                        - **Intent Detection**: Understands your query type
-                        - **Knowledge Retrieval**: Searches your documents
-                        - **Response Generation**: Creates contextual answers
-                        - **Conversation Flow**: Manages multi-turn dialogue
-                        
-                        **Conversation Phases:**
-                        - 👋 **Greeting**: Initial welcome
-                        - 🤔 **Understanding**: Intent analysis
-                        - 🔍 **Searching**: Knowledge retrieval
-                        - 💬 **Responding**: Answer generation
-                        - ❓ **Clarifying**: Follow-up questions
-                        - 🎯 **Follow-up**: Related suggestions
-                        """)
+                        # Debug information (collapsible)
+                        with gr.Accordion("🔧 Debug Info", open=False):
+                            debug_info = gr.JSON(
+                                label="Last Response Data",
+                                value={},
+                                visible=True
+                            )
 
             # Help Tab
             with gr.Tab("❓ Help"):
@@ -3032,162 +3319,182 @@ def create_fixed_interface():
             outputs=heartbeat_output
         )
         
-        # Conversation event handlers
+        # Enhanced conversation event handlers
         def start_conversation_and_update():
             """Start a new conversation and update UI"""
             history, session_id, status = ui.start_new_conversation()
             conversation_status_text = ui.get_conversation_status(session_id)
-            return history, session_id, status, conversation_status_text
+            
+            # Clear all suggestion elements
+            suggestion_updates = [
+                gr.update(value="", visible=False) for _ in range(4)  # suggestion buttons
+            ]
+            topic_updates = [
+                gr.update(value="", visible=False) for _ in range(6)  # topic chips
+            ]
+            
+            return (
+                history, session_id, status, conversation_status_text,
+                "💡 Start a conversation to see personalized hints and suggestions!",
+                "", "", "",  # Clear insights, entity exploration, technical terms
+                {}  # Clear debug info
+            ) + tuple(suggestion_updates) + tuple(topic_updates)
         
         def send_message_and_update(message, session_id, history):
-            """Send message and update conversation"""
-            message_cleared, updated_history, status = ui.send_conversation_message(message, session_id, history)
+            """Send message and update conversation with enhanced suggestions"""
+            try:
+                message_cleared, updated_history, status, enhanced_data = ui.send_conversation_message(message, session_id, history)
+            except Exception as e:
+                # Fallback when conversation API is not available
+                updated_history = history + [
+                    {"role": "user", "content": message},
+                    {"role": "assistant", "content": "🚧 Conversation API not available. Please use the Query Testing tab for Q&A functionality."}
+                ]
+                enhanced_data = {
+                    'suggestions': [],
+                    'topics': [],
+                    'entities': [],
+                    'technical_terms': [],
+                    'insights': {},
+                    'hints': ['💡 Use the Query Testing tab for document Q&A functionality']
+                }
+                message_cleared = ""
+                status = f"❌ Conversation API error: {str(e)}"
+            
             conversation_status_text = ui.get_conversation_status(session_id)
-            return message_cleared, updated_history, status, conversation_status_text
+            
+            # Update suggestion buttons with error handling
+            suggestions = enhanced_data.get('suggestions', [])
+            suggestion_updates = []
+            for i in range(4):
+                if i < len(suggestions):
+                    suggestion = suggestions[i]
+                    if isinstance(suggestion, dict):
+                        icon = suggestion.get('icon', '💬')
+                        text = suggestion.get('question', suggestion.get('text', ''))
+                        button_text = f"{icon} {text[:50]}..." if text else ""
+                    else:
+                        # Handle case where suggestion is a string
+                        button_text = f"💬 {str(suggestion)[:50]}..." if suggestion else ""
+                    
+                    if button_text.strip():
+                        suggestion_updates.append(gr.update(value=button_text, visible=True))
+                    else:
+                        suggestion_updates.append(gr.update(value="", visible=False))
+                else:
+                    suggestion_updates.append(gr.update(value="", visible=False))
+            
+            # Update topic chips with error handling
+            topics = enhanced_data.get('topics', [])
+            topic_updates = []
+            for i in range(6):
+                if i < len(topics):
+                    topic = topics[i] if isinstance(topics[i], str) else str(topics[i])
+                    if topic.strip():
+                        topic_updates.append(gr.update(value=f"🔍 {topic}", visible=True))
+                    else:
+                        topic_updates.append(gr.update(value="", visible=False))
+                else:
+                    topic_updates.append(gr.update(value="", visible=False))
+            
+            # Format interaction hints
+            hints = enhanced_data.get('hints', [])
+            hints_text = "\n".join([f"• {hint}" for hint in hints]) if hints else "💡 Continue the conversation for more suggestions!"
+            
+            # Format conversation insights
+            insights = enhanced_data.get('insights', {})
+            insights_text = ""
+            if insights:
+                coverage = insights.get('information_coverage', 'unknown')
+                continuity = insights.get('topic_continuity', 0)
+                insights_text = f"📊 **Coverage:** {coverage} | **Continuity:** {continuity:.1f}"
+                
+                exploration_path = insights.get('exploration_path', [])
+                if exploration_path:
+                    insights_text += f"\n\n**Suggested Path:**\n"
+                    insights_text += "\n".join([f"• {step}" for step in exploration_path[:3]])
+            
+            # Format entities
+            entities = enhanced_data.get('entities', [])
+            entities_text = ""
+            if entities:
+                entities_text = "**Mentioned Entities:**\n"
+                for entity in entities[:4]:
+                    if isinstance(entity, dict):
+                        name = entity.get('name', 'Unknown')
+                        entity_type = entity.get('type', 'unknown')
+                        entities_text += f"• {name} ({entity_type})\n"
+                    else:
+                        entities_text += f"• {entity}\n"
+            
+            # Format technical terms
+            terms = enhanced_data.get('technical_terms', [])
+            terms_text = ""
+            if terms:
+                terms_text = "**Technical Terms:**\n"
+                for term in terms[:3]:
+                    if isinstance(term, dict):
+                        term_name = term.get('term', 'Unknown')
+                        difficulty = term.get('difficulty', 'medium')
+                        terms_text += f"• {term_name} ({difficulty})\n"
+                    else:
+                        terms_text += f"• {term}\n"
+            
+            return (
+                message_cleared, updated_history, status, conversation_status_text,
+                hints_text,
+                insights_text if insights_text else "",
+                entities_text if entities_text else "",
+                terms_text if terms_text else "",
+                enhanced_data  # Debug info
+            ) + tuple(suggestion_updates) + tuple(topic_updates)
         
         def end_conversation_and_update(session_id):
             """End conversation and update UI"""
             end_history, cleared_session, status = ui.end_conversation(session_id)
-            return end_history, cleared_session, status, "No active conversation"
+            
+            # Clear all UI elements
+            suggestion_updates = [
+                gr.update(value="", visible=False) for _ in range(4)
+            ]
+            topic_updates = [
+                gr.update(value="", visible=False) for _ in range(6)
+            ]
+            
+            return (
+                end_history, cleared_session, status, "No active conversation",
+                "💡 Start a new conversation to see suggestions!",
+                "", "", "",  # Clear insights, entities, terms
+                {}  # Clear debug info
+            ) + tuple(suggestion_updates) + tuple(topic_updates)
         
-        def refresh_conversation_status(session_id):
-            """Refresh conversation status"""
-            status_text = ui.get_conversation_status(session_id)
-            return status_text
-        
-        # Conversation tab event handlers
-        start_conversation_btn.click(
-            fn=start_conversation_and_update,
-            outputs=[chatbot, session_id_display, conversation_status, conversation_status]
-        )
-        
-        send_button.click(
-            fn=send_message_and_update,
-            inputs=[message_input, session_id_display, chatbot],
-            outputs=[message_input, chatbot, conversation_status, conversation_status]
-        )
-        
-        message_input.submit(
-            fn=send_message_and_update,
-            inputs=[message_input, session_id_display, chatbot],
-            outputs=[message_input, chatbot, conversation_status, conversation_status]
-        )
-        
-        end_conversation_btn.click(
-            fn=end_conversation_and_update,
-            inputs=[session_id_display],
-            outputs=[chatbot, session_id_display, conversation_status, conversation_status]
-        )
-        
-        refresh_conversation_btn.click(
-            fn=refresh_conversation_status,
-            inputs=[session_id_display],
-            outputs=[conversation_status]
-        )
-
-        # Initialize connection status on load
-        interface.load(
-            fn=ui.check_api_connection,
-            outputs=[connection_status]
-        )
-    
-    return interface
-
-def check_server_status(api_url: str = "http://localhost:8000", max_retries: int = 3) -> bool:
-    """Check if the server is running"""
-    for attempt in range(max_retries):
-        try:
-            response = requests.get(f"{api_url}/health", timeout=5)
-            if response.status_code == 200:
-                print(f"✅ Server is running and healthy!")
-                return True
-            else:
-                print(f"❌ Attempt {attempt + 1}/{max_retries}: Server responded with status {response.status_code}")
-        except requests.exceptions.RequestException as e:
-            print(f"❌ Attempt {attempt + 1}/{max_retries}: Server not responding - {e}")
-        
-        if attempt < max_retries - 1:
-            print("⏳ Waiting 2 seconds before retry...")
-            time.sleep(2)
-    
-    return False
-
-def main():
-    """Main function to launch the fixed UI"""
-    print("DEBUG: Starting main() function")
-    
-    # Check server status
-    print("DEBUG: Checking server status...")
-    if not check_server_status():
-        print("❌ Cannot connect to RAG server. Please ensure the server is running on http://localhost:8000")
-        print("   Start the server with: python main.py")
-        return
-    
-    print("DEBUG: Server is running, proceeding with UI creation...")
-    
-    # Create and launch interface
-    print("🎛️ Creating fixed interface...")
-    print("DEBUG: About to call create_fixed_interface()")
-    interface = create_fixed_interface()
-    print("DEBUG: Interface created successfully")
-    
-    print("""
-🌟 FIXED DOCUMENT LIFECYCLE MANAGEMENT UI
-==================================================
-🌐 API Server: http://localhost:8000
-🎛️ Fixed UI: http://localhost:7869
-📁 Key Improvements:
-  ✅ Smart Upload/Update (single interface)
-  ✅ Auto-refresh dropdowns
-  ✅ Clear status messages
-  ✅ Upload counter tracking
-  ✅ Better user experience
-💬 NEW: LangGraph Conversational Chat
-  ✅ Multi-turn conversations with context
-  ✅ Knowledge-based responses
-  ✅ Session management
-  ✅ Intent detection and routing
-🎯 Test the improved Upload → Update → Delete → Query → Chat workflow!
-   No more confusion about upload vs update!
-Ready to launch! Press Ctrl+C to stop the UI
-==================================================
-""")
-    
-    print("DEBUG: About to launch interface on port 7869")
-    try:
-        # Try with specific port first
-        interface.launch(
-            server_port=7869,
-            share=False,
-            show_error=True,
-            inbrowser=True,
-            prevent_thread_lock=False
-        )
-    except ValueError as ve:
-        print(f"❌ ValueError on port 7869: {ve}")
-        print("🔄 Trying with auto port selection...")
-        try:
-            interface.launch(
-                share=False,
-                show_error=True,
-                inbrowser=True,
-                prevent_thread_lock=False
-            )
-        except Exception as e2:
-            print(f"❌ Auto port launch failed: {e2}")
-            print("🔧 Trying minimal launch configuration...")
+        def handle_suggestion_click(suggestion_text, session_id, history):
+            """Handle suggestion button click"""
+            if not suggestion_text or not suggestion_text.strip():
+                return "", history, "No suggestion selected", {}
+            
+            # Extract the actual question from the button text (remove emoji and truncation)
+            clean_question = suggestion_text.split(" ", 1)[1] if " " in suggestion_text else suggestion_text
+            clean_question = clean_question.replace("...", "")
+            
+            # Send the suggestion as a message and get the full response
             try:
-                interface.launch(
-                    show_error=True
-                )
-            except Exception as e3:
-                print(f"❌ All launch attempts failed: {e3}")
-                print("💡 Please try running: gradio --version")
-                print("💡 Or try: pip install --upgrade gradio")
-    except Exception as e:
-        print(f"❌ Unexpected error: {e}")
-        print("🔄 Trying basic launch...")
-        interface.launch()
-
+                full_response = send_message_and_update(clean_question, session_id, history)
+                # Extract only the first 4 values that match our outputs
+                message_cleared = full_response[0]
+                updated_history = full_response[1] 
+                status = full_response[2]
+                debug_data = full_response[8] if len(full_response) > 8 else {}
+                
+                # Ensure debug_data is JSON serializable
+                if not isinstance(debug_data, (dict, list, str, int, float, bool, type(None))):
+                    debug_data = str(debug_data)
+                
+                return message_cleared, updated_history, status, debug_data
+            except Exception as e:
+                return "", history, f"Error: {str(e)}", {"error": str(e)}
+        
+        def handle_topic_click(topic_text, session_id, history):
+            """Handle topic chip click"""
 if __name__ == "__main__":
     main()
