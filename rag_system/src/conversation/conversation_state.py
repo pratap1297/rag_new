@@ -94,12 +94,12 @@ class ConversationState(TypedDict):
     user_preferences: Dict[str, Any]
     conversation_metadata: Dict[str, Any]
 
-def create_conversation_state(session_id: Optional[str] = None) -> ConversationState:
+def create_conversation_state(thread_id: Optional[str] = None) -> ConversationState:
     """Create a new conversation state with default values"""
     return ConversationState(
         # Core conversation data
         conversation_id=str(uuid.uuid4()),
-        session_id=session_id or str(uuid.uuid4()),
+        session_id=thread_id or str(uuid.uuid4()),
         messages=[],
         
         # Current conversation context

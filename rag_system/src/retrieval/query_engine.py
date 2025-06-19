@@ -99,11 +99,18 @@ class QueryEngine:
             if not search_results:
                 return self._create_empty_response(original_query)
             
-            # Filter by similarity threshold
-            filtered_results = [
-                result for result in search_results
-                if result.get('similarity_score', 0) >= self.config.retrieval.similarity_threshold
-            ]
+            # Filter by similarity threshold (with bypass option for conversation context)
+            bypass_threshold = (conversation_context and 
+                               conversation_context.get('bypass_threshold', False))
+            
+            if bypass_threshold:
+                logging.info("Bypassing similarity threshold for conversation context")
+                filtered_results = search_results
+            else:
+                filtered_results = [
+                    result for result in search_results
+                    if result.get('similarity_score', 0) >= self.config.retrieval.similarity_threshold
+                ]
             
             if not filtered_results:
                 return self._create_empty_response(original_query)
@@ -162,6 +169,9 @@ class QueryEngine:
                     'reformulated_queries': enhanced_query.reformulated_queries,
                     'total_variants': len(query_variants)
                 }
+            
+            # Add debugging logging as suggested in con_sug.md
+            logging.info(f"Query engine returning: response length={len(response)}, sources count={len(top_results)}")
             
             return response_data
             

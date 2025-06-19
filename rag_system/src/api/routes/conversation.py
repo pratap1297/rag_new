@@ -1,6 +1,6 @@
 """
 Conversation API Routes
-FastAPI endpoints for LangGraph conversation management
+FastAPI endpoints for LangGraph conversation management with state persistence
 """
 import logging
 from typing import Dict, Any, Optional, List
@@ -13,17 +13,19 @@ logger = logging.getLogger(__name__)
 
 # Request/Response models
 class ConversationStartRequest(BaseModel):
-    session_id: Optional[str] = Field(None, description="Optional session ID")
+    thread_id: Optional[str] = Field(None, description="Optional thread ID for conversation")
+    session_id: Optional[str] = Field(None, description="Deprecated: Use thread_id instead")
     user_preferences: Optional[Dict[str, Any]] = Field(default_factory=dict)
 
 class ConversationMessageRequest(BaseModel):
     message: str = Field(..., min_length=1, max_length=2000)
-    session_id: str = Field(..., description="Session ID")
+    thread_id: Optional[str] = Field(None, description="Thread ID for conversation")
+    session_id: Optional[str] = Field(None, description="Deprecated: Use thread_id instead")
     metadata: Optional[Dict[str, Any]] = Field(default_factory=dict)
 
 class ConversationResponse(BaseModel):
     response: str
-    session_id: str
+    thread_id: str
     conversation_id: str
     turn_count: int
     current_phase: str
@@ -32,11 +34,12 @@ class ConversationResponse(BaseModel):
     suggested_questions: Optional[List[str]] = None
     related_topics: Optional[List[str]] = None
     sources: Optional[List[Dict[str, Any]]] = None
+    total_sources: Optional[int] = None
     errors: Optional[List[str]] = None
 
 class ConversationHistoryResponse(BaseModel):
     messages: List[Dict[str, Any]]
-    session_id: str
+    thread_id: str
     conversation_id: str
     turn_count: int
     current_phase: str
@@ -71,23 +74,19 @@ async def start_conversation(
     request: ConversationStartRequest = None,
     manager = Depends(get_conversation_manager)
 ):
-    """Start a new conversation"""
+    """Start a new conversation using LangGraph state persistence"""
     try:
         if request is None:
             request = ConversationStartRequest()
         
-        state = manager.start_conversation(request.session_id)
+        # Use thread_id if provided, otherwise fall back to session_id for backward compatibility
+        thread_id = request.thread_id or request.session_id
         
-        # Apply user preferences if provided
-        if request.user_preferences:
-            state.user_preferences.update(request.user_preferences)
-        
-        # Get the initial greeting response
-        response = manager._format_response(state)
+        response = manager.start_conversation(thread_id)
         
         return {
             "status": "success",
-            "message": "Conversation started",
+            "message": "Conversation started with LangGraph state persistence",
             **response
         }
         
@@ -101,9 +100,15 @@ async def send_message(
     background_tasks: BackgroundTasks,
     manager = Depends(get_conversation_manager)
 ):
-    """Send a message in an existing conversation"""
+    """Send a message in an existing conversation using LangGraph state persistence"""
     try:
-        response = manager.process_user_message(request.session_id, request.message)
+        # Use thread_id if provided, otherwise fall back to session_id for backward compatibility
+        thread_id = request.thread_id or request.session_id
+        
+        if not thread_id:
+            raise HTTPException(status_code=400, detail="Either thread_id or session_id must be provided")
+        
+        response = manager.process_user_message(thread_id, request.message)
         
         # Validate response structure
         if 'error' in response:
@@ -117,29 +122,46 @@ async def send_message(
         logger.error(f"Error processing message: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to process message: {str(e)}")
 
-@router.get("/history/{session_id}", response_model=ConversationHistoryResponse)
+@router.get("/history/{thread_id}", response_model=ConversationHistoryResponse)
 async def get_conversation_history(
-    session_id: str,
+    thread_id: str,
     max_messages: int = 20,
     manager = Depends(get_conversation_manager)
 ):
-    """Get conversation history for a session"""
+    """Get conversation history for a thread using LangGraph state persistence"""
     try:
-        history = manager.get_conversation_history(session_id, max_messages)
+        history = manager.get_conversation_history(thread_id, max_messages)
+        
+        if 'error' in history:
+            raise HTTPException(status_code=500, detail=history['error'])
+        
         return ConversationHistoryResponse(**history)
         
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Error getting conversation history: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to get history: {str(e)}")
 
-@router.post("/end/{session_id}")
-async def end_conversation(
+# Backward compatibility endpoint
+@router.get("/history/session/{session_id}", response_model=ConversationHistoryResponse)
+async def get_conversation_history_by_session(
     session_id: str,
+    max_messages: int = 20,
     manager = Depends(get_conversation_manager)
 ):
-    """End a conversation"""
+    """Get conversation history by session_id (deprecated - use thread_id instead)"""
+    logger.warning(f"Using deprecated session-based history endpoint for {session_id}")
+    return await get_conversation_history(session_id, max_messages, manager)
+
+@router.post("/end/{thread_id}")
+async def end_conversation(
+    thread_id: str,
+    manager = Depends(get_conversation_manager)
+):
+    """End a conversation using LangGraph state persistence"""
     try:
-        result = manager.end_conversation(session_id)
+        result = manager.end_conversation(thread_id)
         return {
             "status": "success",
             **result
@@ -149,11 +171,38 @@ async def end_conversation(
         logger.error(f"Error ending conversation: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to end conversation: {str(e)}")
 
+# Backward compatibility endpoint
+@router.post("/end/session/{session_id}")
+async def end_conversation_by_session(
+    session_id: str,
+    manager = Depends(get_conversation_manager)
+):
+    """End a conversation by session_id (deprecated - use thread_id instead)"""
+    logger.warning(f"Using deprecated session-based end endpoint for {session_id}")
+    return await end_conversation(session_id, manager)
+
+@router.get("/threads")
+async def get_active_conversations(
+    manager = Depends(get_conversation_manager)
+):
+    """Get information about active conversation threads"""
+    try:
+        conversations_info = manager.list_active_conversations()
+        return {
+            "status": "success",
+            **conversations_info
+        }
+        
+    except Exception as e:
+        logger.error(f"Error getting active conversations: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to get conversations: {str(e)}")
+
 @router.get("/sessions")
 async def get_active_sessions(
     manager = Depends(get_conversation_manager)
 ):
-    """Get information about active conversation sessions"""
+    """Get information about active sessions (deprecated - use /threads instead)"""
+    logger.warning("Using deprecated sessions endpoint - use /threads instead")
     try:
         sessions_info = manager.get_active_sessions()
         return {
@@ -171,11 +220,24 @@ async def conversation_health_check():
     try:
         manager = get_conversation_manager()
         from datetime import datetime
+        
+        # Check if LangGraph state persistence is working
+        state_persistence_status = "enabled"
+        try:
+            # Try to access the checkpointer
+            if hasattr(manager.conversation_graph, 'checkpointer') and manager.conversation_graph.checkpointer:
+                state_persistence_status = "enabled"
+            else:
+                state_persistence_status = "disabled"
+        except:
+            state_persistence_status = "error"
+        
         return {
             "status": "healthy",
             "service": "conversation",
             "langgraph_available": True,
-            "active_conversations": len(manager.active_conversations) if manager else 0,
+            "state_persistence": state_persistence_status,
+            "checkpointer_type": "MemorySaver",
             "timestamp": datetime.now().isoformat()
         }
     except Exception as e:
@@ -185,5 +247,6 @@ async def conversation_health_check():
             "service": "conversation", 
             "error": str(e),
             "langgraph_available": False,
+            "state_persistence": "error",
             "timestamp": datetime.now().isoformat()
         } 

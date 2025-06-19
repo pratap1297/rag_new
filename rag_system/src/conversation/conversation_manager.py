@@ -1,10 +1,11 @@
 """
 Conversation Manager
-High-level manager for LangGraph conversations
+High-level manager for LangGraph conversations with built-in state persistence
 """
 import logging
 from typing import Dict, Any, Optional
 from datetime import datetime, timedelta
+import uuid
 
 from .conversation_state import (
     ConversationState, MessageType, ConversationPhase,
@@ -13,61 +14,52 @@ from .conversation_state import (
 from .conversation_graph import ConversationGraph
 
 class ConversationManager:
-    """Manages conversations using LangGraph"""
+    """Manages conversations using LangGraph with built-in state persistence"""
     
-    def __init__(self, container=None, session_timeout_minutes: int = 30):
+    def __init__(self, container=None, db_path: str = None):
         self.container = container
-        self.session_timeout_minutes = session_timeout_minutes
         self.logger = logging.getLogger(__name__)
         
-        # Active conversations by session ID
-        self.active_conversations: Dict[str, ConversationState] = {}
+        # Initialize conversation graph with state persistence
+        self.conversation_graph = ConversationGraph(container, db_path)
         
-        # Initialize conversation graph
-        self.conversation_graph = ConversationGraph(container)
-        
-        self.logger.info("ConversationManager initialized")
+        self.logger.info("ConversationManager initialized with LangGraph state persistence")
     
-    def start_conversation(self, session_id: Optional[str] = None) -> ConversationState:
-        """Start a new conversation"""
+    def start_conversation(self, thread_id: Optional[str] = None) -> Dict[str, Any]:
+        """Start a new conversation or get existing one using thread_id"""
         
-        # Create new conversation state
-        state = create_conversation_state(session_id)
-        
-        # Store in active conversations
-        self.active_conversations[state['session_id']] = state
-        
-        # Directly add initial greeting instead of processing empty message
-        greeting = "Hello! I'm your AI assistant. I can help you find information, answer questions, and have a conversation about various topics. What would you like to know?"
-        state = add_message_to_state(state, MessageType.ASSISTANT, greeting)
-        state['current_phase'] = ConversationPhase.UNDERSTANDING
-        
-        # Update stored state
-        self.active_conversations[state['session_id']] = state
-        
-        self.logger.info(f"Started new conversation: {state['conversation_id']}")
-        return state
-    
-    def process_user_message(self, session_id: str, message: str) -> Dict[str, Any]:
-        """Process a user message and return response"""
+        if thread_id is None:
+            thread_id = str(uuid.uuid4())
         
         try:
-            # Get or create conversation state
-            state = self.get_or_create_conversation(session_id)
+            # Process initial greeting (empty message to trigger greeting)
+            state = self.conversation_graph.process_message(thread_id, "")
             
-            # Clean up expired conversations
-            self._cleanup_expired_conversations()
+            # Format initial response
+            response = self._format_response(state, thread_id)
             
-            # Process message through graph
-            updated_state = self.conversation_graph.process_message(state, message)
+            self.logger.info(f"Started/retrieved conversation for thread: {thread_id}")
+            return response
             
-            # Update stored state
-            self.active_conversations[session_id] = updated_state
+        except Exception as e:
+            self.logger.error(f"Error starting conversation: {e}")
+            return {
+                'response': "Hello! I'm your AI assistant. I can help you find information, answer questions, and have a conversation about various topics. What would you like to know?",
+                'thread_id': thread_id,
+                'error': str(e)
+            }
+    
+    def process_user_message(self, thread_id: str, message: str) -> Dict[str, Any]:
+        """Process a user message using LangGraph state management"""
+        
+        try:
+            # Process message through LangGraph with state persistence
+            updated_state = self.conversation_graph.process_message(thread_id, message)
             
             # Format response
-            response = self._format_response(updated_state)
+            response = self._format_response(updated_state, thread_id)
             
-            self.logger.info(f"Processed message for session {session_id}")
+            self.logger.info(f"Processed message for thread {thread_id}")
             return response
             
         except Exception as e:
@@ -75,109 +67,97 @@ class ConversationManager:
             return {
                 'response': "I apologize, but I encountered an error. Please try again.",
                 'error': str(e),
-                'session_id': session_id
+                'thread_id': thread_id
             }
     
-    def get_conversation_history(self, session_id: str, max_messages: int = 20) -> Dict[str, Any]:
-        """Get conversation history for a session"""
+    def get_conversation_history(self, thread_id: str, max_messages: int = 20) -> Dict[str, Any]:
+        """Get conversation history for a thread using LangGraph state"""
         
-        state = self.active_conversations.get(session_id)
-        if not state:
-            return {'messages': [], 'session_id': session_id}
-        
-        messages = get_conversation_history(state, max_messages)
-        
-        return {
-            'messages': [
-                {
-                    'type': msg['type'].value,
-                    'content': msg['content'],
-                    'timestamp': msg['timestamp'],
-                    'metadata': msg['metadata']
-                }
-                for msg in messages
-            ],
-            'session_id': session_id,
-            'conversation_id': state['conversation_id'],
-            'turn_count': state['turn_count'],
-            'current_phase': state['current_phase'].value,
-            'topics_discussed': state['topics_discussed']
-        }
+        try:
+            return self.conversation_graph.get_conversation_history(thread_id, max_messages)
+        except Exception as e:
+            self.logger.error(f"Error getting conversation history: {e}")
+            return {
+                'messages': [],
+                'thread_id': thread_id,
+                'error': str(e)
+            }
     
-    def end_conversation(self, session_id: str) -> Dict[str, Any]:
-        """End a conversation"""
+    def end_conversation(self, thread_id: str) -> Dict[str, Any]:
+        """End a conversation by processing a goodbye message"""
         
-        if session_id in self.active_conversations:
-            state = self.active_conversations[session_id]
-            
-            # Add farewell message
-            farewell = "Thank you for the conversation! Feel free to start a new chat anytime."
-            state = add_message_to_state(state, MessageType.ASSISTANT, farewell)
+        try:
+            # Process goodbye message to trigger farewell
+            final_state = self.conversation_graph.process_message(thread_id, "goodbye")
             
             # Generate conversation summary
-            summary = self._generate_conversation_summary(state)
+            summary = self._generate_conversation_summary(final_state)
             
-            # Remove from active conversations
-            del self.active_conversations[session_id]
-            
-            self.logger.info(f"Ended conversation for session {session_id}")
+            self.logger.info(f"Ended conversation for thread {thread_id}")
             
             return {
                 'message': 'Conversation ended',
                 'summary': summary,
-                'session_id': session_id,
-                'total_turns': state['turn_count']
+                'thread_id': thread_id,
+                'total_turns': final_state.get('turn_count', 0)
             }
-        
-        return {'message': 'No active conversation found', 'session_id': session_id}
+        except Exception as e:
+            self.logger.error(f"Error ending conversation: {e}")
+            return {
+                'message': 'Error ending conversation',
+                'thread_id': thread_id,
+                'error': str(e)
+            }
     
-    def get_or_create_conversation(self, session_id: str) -> ConversationState:
-        """Get existing conversation or create new one"""
+    def list_active_conversations(self) -> Dict[str, Any]:
+        """List all conversation threads (placeholder - would need database query)"""
         
-        if session_id in self.active_conversations:
-            state = self.active_conversations[session_id]
+        try:
+            # This would require querying the SQLite database directly
+            # For now, return a placeholder response
+            threads = self.conversation_graph.list_conversation_threads()
             
-            # Check if conversation has expired
-            last_activity = datetime.fromisoformat(state['last_activity'])
-            if datetime.now() - last_activity > timedelta(minutes=self.session_timeout_minutes):
-                # Conversation expired, create new one
-                del self.active_conversations[session_id]
-                return self.start_conversation(session_id)
-            
-            return state
-        else:
-            # Create new conversation
-            return self.start_conversation(session_id)
+            return {
+                'active_count': len(threads),
+                'threads': threads
+            }
+        except Exception as e:
+            self.logger.error(f"Error listing conversations: {e}")
+            return {
+                'active_count': 0,
+                'threads': [],
+                'error': str(e)
+            }
     
-    def _format_response(self, state: ConversationState) -> Dict[str, Any]:
+    def _format_response(self, state: ConversationState, thread_id: str) -> Dict[str, Any]:
         """Format conversation state into response"""
         
         # Get the latest assistant message
-        assistant_messages = [msg for msg in state['messages'] if msg['type'] == MessageType.ASSISTANT]
+        assistant_messages = [msg for msg in state.get('messages', []) if msg.get('type') == MessageType.ASSISTANT]
         latest_response = assistant_messages[-1]['content'] if assistant_messages else ""
         
         response = {
             'response': latest_response,
-            'session_id': state['session_id'],
-            'conversation_id': state['conversation_id'],
-            'turn_count': state['turn_count'],
-            'current_phase': state['current_phase'].value,
-            'confidence_score': state['response_confidence'],
-            'confidence': state['response_confidence'],  # Add alias for compatibility
+            'thread_id': thread_id,
+            'conversation_id': state.get('conversation_id', ''),
+            'turn_count': state.get('turn_count', 0),
+            'current_phase': state.get('current_phase', ConversationPhase.UNDERSTANDING).value if hasattr(state.get('current_phase'), 'value') else str(state.get('current_phase', 'understanding')),
+            'confidence_score': state.get('response_confidence', 0.0),
+            'confidence': state.get('response_confidence', 0.0),  # Add alias for compatibility
             'timestamp': datetime.now().isoformat()
         }
         
         # Add optional fields if available
-        if state['suggested_questions']:
+        if state.get('suggested_questions'):
             response['suggested_questions'] = state['suggested_questions']
         
-        if state['related_topics']:
+        if state.get('related_topics'):
             response['related_topics'] = state['related_topics']
         
-        if state['search_results']:
+        if state.get('search_results'):
             response['sources'] = [
                 {
-                    'content': result['content'][:200] + "..." if len(result['content']) > 200 else result['content'],
+                    'content': result['content'][:300] + "..." if len(result['content']) > 300 else result['content'],
                     'score': result['score'],
                     'source': result['source']
                 }
@@ -187,34 +167,19 @@ class ConversationManager:
         else:
             response['total_sources'] = 0
         
-        if state['has_errors']:
-            response['errors'] = state['error_messages']
+        if state.get('has_errors'):
+            response['errors'] = state.get('error_messages', [])
         
         return response
-    
-    def _cleanup_expired_conversations(self):
-        """Remove expired conversations"""
-        
-        current_time = datetime.now()
-        expired_sessions = []
-        
-        for session_id, state in self.active_conversations.items():
-            last_activity = datetime.fromisoformat(state['last_activity'])
-            if current_time - last_activity > timedelta(minutes=self.session_timeout_minutes):
-                expired_sessions.append(session_id)
-        
-        for session_id in expired_sessions:
-            del self.active_conversations[session_id]
-            self.logger.info(f"Cleaned up expired conversation: {session_id}")
     
     def _generate_conversation_summary(self, state: ConversationState) -> str:
         """Generate a summary of the conversation"""
         
-        if not state['messages']:
+        if not state.get('messages'):
             return "No conversation content"
         
-        user_messages = [msg['content'] for msg in state['messages'] if msg['type'] == MessageType.USER]
-        topics = state['topics_discussed']
+        user_messages = [msg['content'] for msg in state.get('messages', []) if msg.get('type') == MessageType.USER]
+        topics = state.get('topics_discussed', [])
         
         summary_parts = []
         
@@ -224,23 +189,22 @@ class ConversationManager:
         if user_messages:
             summary_parts.append(f"Total user messages: {len(user_messages)}")
         
-        summary_parts.append(f"Conversation turns: {state['turn_count']}")
+        summary_parts.append(f"Conversation turns: {state.get('turn_count', 0)}")
         
         return "; ".join(summary_parts)
     
+    # Deprecated methods for backward compatibility
+    def get_or_create_conversation(self, session_id: str) -> ConversationState:
+        """Deprecated: Use thread_id based methods instead"""
+        self.logger.warning("get_or_create_conversation is deprecated. Use thread_id based methods.")
+        # For backward compatibility, treat session_id as thread_id
+        try:
+            return self.conversation_graph._get_or_create_state(session_id)
+        except Exception as e:
+            self.logger.error(f"Error in deprecated method: {e}")
+            return create_conversation_state(session_id)
+    
     def get_active_sessions(self) -> Dict[str, Any]:
-        """Get information about active sessions"""
-        
-        return {
-            'active_count': len(self.active_conversations),
-            'sessions': [
-                {
-                    'session_id': session_id,
-                    'conversation_id': state['conversation_id'],
-                    'turn_count': state['turn_count'],
-                    'last_activity': state['last_activity'],
-                    'current_phase': state['current_phase'].value
-                }
-                for session_id, state in self.active_conversations.items()
-            ]
-        } 
+        """Deprecated: Use list_active_conversations instead"""
+        self.logger.warning("get_active_sessions is deprecated. Use list_active_conversations.")
+        return self.list_active_conversations() 

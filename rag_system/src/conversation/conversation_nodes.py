@@ -156,9 +156,16 @@ class ConversationNodes:
             new_state['search_results'] = []
             new_state['context_chunks'] = []
             return new_state
-        
+
         try:
             search_result = None
+            
+            # Create conversation context with bypass threshold for conversation queries
+            conversation_context = {
+                'bypass_threshold': True,  # Bypass similarity threshold for conversation consistency
+                'is_contextual': state.get('is_contextual', False),
+                'conversation_history': state.get('messages', [])
+            }
             
             # For contextual queries, try multiple search strategies
             if state.get('is_contextual', False):
@@ -168,7 +175,8 @@ class ConversationNodes:
                 self.logger.info(f"Search strategy 1: Enhanced query: '{state['processed_query']}'")
                 search_result = self.query_engine.process_query(
                     state['processed_query'],
-                    top_k=5
+                    top_k=5,
+                    conversation_context=conversation_context
                 )
                 
                 # Strategy 2: If no good results, try with original query
@@ -176,7 +184,8 @@ class ConversationNodes:
                     self.logger.info(f"Search strategy 2: Original query: '{state['original_query']}'")
                     search_result = self.query_engine.process_query(
                         state['original_query'],
-                        top_k=5
+                        top_k=5,
+                        conversation_context=conversation_context
                     )
                 
                 # Strategy 3: If still no results, try searching for the main topic
@@ -186,59 +195,80 @@ class ConversationNodes:
                     if topic_match:
                         topic = topic_match.group(1).strip()
                         self.logger.info(f"Search strategy 3: Main topic: '{topic}'")
-                        search_result = self.query_engine.process_query(topic, top_k=5)
+                        search_result = self.query_engine.process_query(
+                            topic, 
+                            top_k=5,
+                            conversation_context=conversation_context
+                        )
                     
                     # Also try with stored topic entities
                     if (not search_result or not search_result.get('sources')) and state.get('topic_entities'):
                         for entity in state['topic_entities'][::-1]:  # Try most recent first
                             self.logger.info(f"Search strategy 4: Topic entity: '{entity}'")
-                            search_result = self.query_engine.process_query(entity, top_k=5)
+                            search_result = self.query_engine.process_query(
+                                entity, 
+                                top_k=5,
+                                conversation_context=conversation_context
+                            )
                             if search_result and search_result.get('sources'):
                                 break
             else:
-                # Non-contextual query - proceed as normal
+                # Non-contextual query - proceed as normal with bypass
                 self.logger.info(f"Non-contextual search: '{state['processed_query']}'")
                 search_result = self.query_engine.process_query(
                     state['processed_query'],
-                    top_k=5
+                    top_k=5,
+                    conversation_context=conversation_context
                 )
             
-            # Process search results
-            if search_result and search_result.get('sources'):
+            # Log the search result structure for debugging
+            self.logger.info(f"Search result type: {type(search_result)}")
+            self.logger.info(f"Search result keys: {list(search_result.keys()) if isinstance(search_result, dict) else 'Not a dict'}")
+            
+            # The query engine returns a dict with 'response' and 'sources'
+            if search_result and isinstance(search_result, dict):
+                # Check if we have sources
                 sources = search_result.get('sources', [])
-                search_results = []
-                context_chunks = []
                 
-                self.logger.info(f"Processing {len(sources)} sources from search result")
-                
-                for i, source in enumerate(sources):
-                    self.logger.info(f"Source {i+1}: filename={source.get('metadata', {}).get('filename', 'Unknown')}")
-                    self.logger.info(f"Source {i+1}: text preview={source.get('text', '')[:100]}...")
+                if sources:
+                    search_results = []
+                    context_chunks = []
                     
-                    search_res = SearchResult(
-                        content=source.get('text', ''),
-                        score=source.get('similarity_score', source.get('score', 0)),
-                        source=source.get('metadata', {}).get('filename', 'unknown'),
-                        metadata=source.get('metadata', {})
-                    )
-                    search_results.append(search_res)
+                    self.logger.info(f"Processing {len(sources)} sources from search result")
                     
-                    # Add to context chunks
-                    if search_res['content']:
-                        context_chunks.append(search_res['content'])
-                
-                new_state['search_results'] = search_results
-                new_state['context_chunks'] = context_chunks
-                new_state['relevant_sources'] = sources
-                
-                # Store the query engine response separately (if available)
-                new_state['query_engine_response'] = search_result.get('response', '')
+                    for i, source in enumerate(sources):
+                        # The source format from query_engine includes these fields
+                        search_res = SearchResult(
+                            content=source.get('text', ''),  # Note: query_engine uses 'text' field
+                            score=source.get('similarity_score', source.get('score', 0)),
+                            source=source.get('source', source.get('metadata', {}).get('filename', 'unknown')),
+                            metadata=source.get('metadata', {})
+                        )
+                        search_results.append(search_res)
+                        
+                        # Add to context chunks
+                        if search_res['content']:
+                            context_chunks.append(search_res['content'])
+                    
+                    new_state['search_results'] = search_results
+                    new_state['context_chunks'] = context_chunks
+                    new_state['relevant_sources'] = sources
+                    
+                    # Store the query engine response if available
+                    new_state['query_engine_response'] = search_result.get('response', '')
+                    
+                    self.logger.info(f"Found {len(search_results)} relevant sources")
+                else:
+                    # No sources found, but we might have a response
+                    self.logger.info("No sources found in search result")
+                    new_state['search_results'] = []
+                    new_state['context_chunks'] = []
+                    new_state['query_engine_response'] = search_result.get('response', '')
                 
                 new_state['current_phase'] = ConversationPhase.RESPONDING
-                self.logger.info(f"Found {len(search_results)} relevant sources")
             else:
-                # No results found
-                self.logger.info("No search results found")
+                # Invalid search result format
+                self.logger.warning(f"Invalid search result format: {type(search_result)}")
                 new_state['current_phase'] = ConversationPhase.RESPONDING
                 new_state['requires_clarification'] = False
                 new_state['search_results'] = []
@@ -254,13 +284,35 @@ class ConversationNodes:
     
     def generate_response(self, state: ConversationState) -> ConversationState:
         """Generate response using LLM with retrieved context"""
+        self.logger.info("🎯 GENERATE_RESPONSE METHOD CALLED 🎯")
         self.logger.info("Processing response generation node")
         
         new_state = state.copy()
         
         if not self.llm_client:
-            response = "I apologize, but I'm currently unable to generate responses. Please try again later."
-            return add_message_to_state(new_state, MessageType.ASSISTANT, response)
+            # Even without LLM client, we can still provide a response using search results with source info
+            if state.get('search_results') and state['search_results']:
+                # Use the first search result with source attribution
+                first_result = state['search_results'][0]
+                source = first_result.get('source', 'Unknown source')
+                content = first_result['content'][:300]
+                response = f"Based on information from {source}: {content}..."
+                self.logger.info("Generated response using search results without LLM")
+            else:
+                response = "I apologize, but I couldn't find relevant information to answer your question."
+                self.logger.info("No search results available for response generation")
+            
+            # Preserve all search-related data when adding the response
+            response_state = add_message_to_state(new_state, MessageType.ASSISTANT, response)
+            # Ensure search_results are preserved in the response state
+            if state.get('search_results'):
+                response_state['search_results'] = state['search_results']
+            if state.get('context_chunks'):
+                response_state['context_chunks'] = state['context_chunks']
+            if state.get('query_engine_response'):
+                response_state['query_engine_response'] = state['query_engine_response']
+            
+            return response_state
         
         try:
             if state['user_intent'] == "goodbye":
@@ -277,11 +329,20 @@ class ConversationNodes:
             new_state = add_message_to_state(new_state, MessageType.ASSISTANT, response)
             
             # Generate follow-up questions and related topics
+            self.logger.info("🚀 About to call _generate_follow_up_questions method")
             new_state['suggested_questions'] = self._generate_follow_up_questions(state)
+            self.logger.info(f"🎯 Generated {len(new_state['suggested_questions'])} suggested questions")
             new_state['related_topics'] = self._extract_related_topics(state)
             
             # Set response confidence
             new_state['response_confidence'] = 0.8 if state.get('search_results') else 0.6
+            
+            # Log source information for debugging
+            if state.get('search_results'):
+                sources = [r.get('source', 'Unknown') for r in state['search_results'][:3]]
+                self.logger.info(f"Response generated using sources: {sources}")
+            else:
+                self.logger.info("Response generated without search results")
             
             self.logger.info("Response generated successfully")
             
@@ -431,7 +492,7 @@ class ConversationNodes:
     def _generate_contextual_response(self, state: ConversationState) -> str:
         """Generate response based on search results and context"""
         
-        # Check if we have a response from the query engine - use it directly
+        # First check if we have a response from the query engine
         if state.get('query_engine_response') and state['query_engine_response'].strip():
             self.logger.info("Using query engine response directly")
             return state['query_engine_response']
@@ -445,27 +506,37 @@ class ConversationNodes:
             
             # If we have search results, use them with conversation context
             if state.get('search_results') and state['search_results']:
-                # Get search results context
-                context_text = "\n\n".join([result['content'] for result in state['search_results'][:3]])
+                # Enhanced search results context with source information
+                context_parts = []
+                for i, result in enumerate(state['search_results'][:3], 1):
+                    content = result['content'][:400]
+                    source = result.get('source', 'Unknown')
+                    score = result.get('score', 0)
+                    
+                    context_parts.append(f"Source {i} ({source}, relevance: {score:.2f}):\n{content}")
+                
+                context_text = "\n\n".join(context_parts)
                 
                 prompt = f"""You are having a conversation with a user. Here is the recent conversation:
 
-    {conversation_context}
+{conversation_context}
 
-    The user's latest question is: "{state['original_query']}"
+The user's latest question is: "{state['original_query']}"
 
-    Based on the following information from the knowledge base, provide a helpful response:
+Based on the following information from the knowledge base, provide a helpful response:
 
-    {context_text}
+{context_text}
 
-    Important instructions:
-    - This is a follow-up question in an ongoing conversation
-    - Consider what has already been discussed and provide NEW or ADDITIONAL information
-    - If the user is asking for "more" information, provide details that weren't mentioned before
-    - If the information requested isn't available in the knowledge base, acknowledge this clearly
-    - Be conversational and reference the previous discussion naturally
+Important instructions:
+- This is a follow-up question in an ongoing conversation
+- Consider what has already been discussed and provide NEW or ADDITIONAL information
+- If the user is asking for "more" information, provide details that weren't mentioned before
+- Reference specific sources when mentioning facts or data (e.g., "According to the Facility_Managers_2024.xlsx file...")
+- If information comes from a specific document, mention it by name
+- If the information requested isn't available in the knowledge base, acknowledge this clearly
+- Be conversational and reference the previous discussion naturally
 
-    Response:"""
+Response:"""
                 
                 try:
                     if self.llm_client:
@@ -477,36 +548,40 @@ class ConversationNodes:
                 # No search results for contextual query
                 return self._generate_no_results_contextual_response(state)
         
-        # For non-contextual queries, check if we have a query engine response
-        if state.get('query_engine_response') and state['query_engine_response'].strip():
-            self.logger.info("Using query engine response (non-contextual query)")
-            return state['query_engine_response']
-        
-        # If no query engine response, try to generate from search results
+        # If no query engine response, generate from search results
         if state.get('search_results') and state['search_results']:
             self.logger.info("Generating response from search results")
             
             # Check if this is a complex query requiring data correlation
             if self._is_complex_correlation_query(state['original_query']):
-                # For complex queries, use a more structured prompt
-                context_text = "\n\n".join([result['content'] for result in state['search_results']])
+                # For complex queries, use enhanced context with source attribution
+                context_parts = []
+                for i, result in enumerate(state['search_results'], 1):
+                    content = result['content'][:500]
+                    source = result.get('source', 'Unknown')
+                    score = result.get('score', 0)
+                    
+                    context_parts.append(f"Source {i} ({source}, relevance: {score:.2f}):\n{content}")
+                
+                context_text = "\n\n".join(context_parts)
                 
                 prompt = f"""You need to answer a complex query that requires correlating information from multiple sources.
 
-    Query: "{state['original_query']}"
+Query: "{state['original_query']}"
 
-    Available Information:
-    {context_text}
+Available Information from Multiple Sources:
+{context_text}
 
-    Instructions:
-    1. Identify all the pieces of information needed to answer the query
-    2. Extract relevant data from the provided context
-    3. Connect the information logically
-    4. Provide a clear, concise final answer
+Instructions:
+1. Identify all the pieces of information needed to answer the query
+2. Extract relevant data from the provided sources, noting which source each piece comes from
+3. Connect the information logically across sources
+4. Reference specific sources in your answer (e.g., "According to Source 1 (filename.xlsx)...")
+5. Provide a clear, concise final answer with source attribution
 
-    If you can find all the required information, format your response with "The final answer is:" followed by the specific details requested.
+If you can find all the required information, format your response with "The final answer is:" followed by the specific details requested with source references.
 
-    Response:"""
+Response:"""
                 
                 try:
                     if self.llm_client:
@@ -515,25 +590,39 @@ class ConversationNodes:
                 except Exception as e:
                     self.logger.error(f"LLM generation failed: {e}")
             else:
-                # Standard response generation
-                context_text = "\n".join([result['content'][:500] for result in state['search_results'][:3]])
+                # Enhanced response generation with source information
+                context_parts = []
+                for i, result in enumerate(state['search_results'][:3], 1):
+                    content = result['content'][:400]
+                    source = result.get('source', 'Unknown')
+                    score = result.get('score', 0)
+                    
+                    # Include source context for better responses
+                    context_parts.append(f"Source {i} ({source}, relevance: {score:.2f}):\n{content}")
                 
-                prompt = f"""Based on the following information, provide a helpful response to the user's query: "{state['original_query']}"
+                context_text = "\n\n".join(context_parts)
+                
+                prompt = f"""Based on the following information from multiple sources, provide a helpful response to the user's query: "{state['original_query']}"
 
-    Context:
-    {context_text}
+Available Information:
+{context_text}
 
-    Please provide a clear, informative response based on the context provided."""
+Instructions:
+- Use the source information to provide accurate, well-attributed responses
+- Reference specific sources when mentioning facts or data
+- If information comes from a specific document (like an Excel file), mention it
+- Provide a comprehensive answer that utilizes information from all relevant sources
+
+Please provide a clear, informative response based on the context provided."""
                 
                 try:
                     if self.llm_client:
-                        response = self.llm_client.generate(prompt)
+                        response = self.llm_client.generate(prompt, max_tokens=500, temperature=0.7)
                         return response.strip()
                 except Exception as e:
                     self.logger.error(f"LLM generation failed: {e}")
         
-        # Final fallback response
-        self.logger.info("Using general response fallback")
+        # Fallback response
         return self._generate_general_response(state)
     
     def _build_conversation_context(self, state: ConversationState) -> str:
@@ -610,19 +699,70 @@ Just ask me anything you'd like to know, and I'll do my best to provide a helpfu
 Could you provide more details about what specifically you'd like to know? This would help me give you a more targeted response."""
     
     def _generate_follow_up_questions(self, state: ConversationState) -> List[str]:
-        """Generate follow-up questions based on the conversation"""
+        """Generate intelligent follow-up questions using LLM and search context"""
         
-        if not state.get('topics_discussed'):
-            return []
+        self.logger.info("🔥 FOLLOW-UP QUESTIONS METHOD CALLED 🔥")
         
-        recent_topics = state['topics_discussed'][-2:]
-        questions = []
-        
-        for topic in recent_topics:
-            questions.append(f"Would you like to know more about {topic}?")
-            questions.append(f"How does {topic} relate to your specific needs?")
-        
-        return questions[:3]  # Return max 3 questions
+        try:
+            self.logger.info("Starting follow-up question generation")
+            
+            # If no LLM client, return basic fallback questions
+            if not self.llm_client:
+                self.logger.warning("No LLM client available, using fallback questions")
+                return self._generate_fallback_follow_up_questions(state)
+            
+            self.logger.info("LLM client is available, proceeding with enhanced suggestions")
+            
+            # Get context from search results and conversation
+            context_info = self._build_suggestion_context(state)
+            self.logger.info(f"Built context info with length: {len(context_info)}")
+            
+            if not context_info:
+                self.logger.warning("No context info available, using fallback questions")
+                return self._generate_fallback_follow_up_questions(state)
+            
+            # Create a focused prompt for generating relevant follow-up questions
+            prompt = f"""Based on the user's question and the information found, generate 4-5 intelligent follow-up questions that would be genuinely helpful.
+
+User's Question: "{state.get('original_query', '')}"
+
+Information Found:
+{context_info}
+
+Generate follow-up questions that:
+1. Explore specific details mentioned in the information
+2. Ask about practical applications or next steps
+3. Clarify relationships between entities/concepts
+4. Seek additional context or specifications
+5. Explore related but not fully covered aspects
+
+Make the questions specific, actionable, and based on the actual content found. Avoid generic questions.
+
+Format as a simple list:
+- Question 1
+- Question 2
+- Question 3
+- Question 4"""
+
+            self.logger.info("Sending prompt to LLM for follow-up questions")
+            response = self.llm_client.generate(prompt, max_tokens=300, temperature=0.7)
+            self.logger.info(f"LLM response length: {len(response)}")
+            
+            # Parse the questions from the response
+            questions = self._parse_follow_up_questions(response)
+            self.logger.info(f"Parsed {len(questions)} questions from LLM response")
+            
+            if questions:
+                self.logger.info(f"Generated {len(questions)} contextual follow-up questions")
+                return questions
+            else:
+                self.logger.warning("Failed to parse LLM-generated questions, using fallback")
+                return self._generate_fallback_follow_up_questions(state)
+                
+        except Exception as e:
+            self.logger.error(f"Error generating follow-up questions: {e}")
+            self.logger.exception("Full exception details:")
+            return self._generate_fallback_follow_up_questions(state)
     
     def _extract_related_topics(self, state: ConversationState) -> List[str]:
         """Extract related topics from search results and conversation context"""
@@ -685,6 +825,184 @@ Could you provide more details about what specifically you'd like to know? This 
                 seen.add(topic.lower())
         
         return unique_topics[:5]
+    
+    def _build_suggestion_context(self, state: ConversationState) -> str:
+        """Build context information for generating suggestions"""
+        context_parts = []
+        
+        # Add enhanced search results context with metadata
+        if state.get('search_results'):
+            context_parts.append("=== SEARCH RESULTS ===")
+            for i, result in enumerate(state['search_results'][:3], 1):
+                content_preview = result.get('content', '')[:250]
+                source = result.get('source', 'Unknown')
+                score = result.get('score', 0)
+                metadata = result.get('metadata', {})
+                
+                context_parts.append(f"Result {i} (Score: {score:.2f}, Source: {source}):")
+                context_parts.append(content_preview + "...")
+                
+                # Include relevant metadata for better context
+                if metadata:
+                    meta_info = []
+                    if metadata.get('doc_path'):
+                        meta_info.append(f"Document: {metadata['doc_path']}")
+                    if metadata.get('filename'):
+                        meta_info.append(f"File: {metadata['filename']}")
+                    if metadata.get('chunk_index') is not None:
+                        meta_info.append(f"Section: {metadata['chunk_index']}")
+                    
+                    if meta_info:
+                        context_parts.append(f"Metadata: {', '.join(meta_info)}")
+                
+                context_parts.append("")
+        
+        # Add conversation context if available
+        if state.get('messages') and len(state['messages']) > 1:
+            context_parts.append("=== CONVERSATION CONTEXT ===")
+            recent_messages = state['messages'][-4:]  # Last 2 exchanges
+            for msg in recent_messages:
+                role = "User" if msg['type'] == MessageType.USER else "Assistant"
+                content = msg['content'][:150]
+                context_parts.append(f"{role}: {content}...")
+            context_parts.append("")
+        
+        # Add any entities or topics mentioned
+        if state.get('extracted_entities'):
+            context_parts.append("=== ENTITIES MENTIONED ===")
+            context_parts.append(", ".join(state['extracted_entities'][:5]))
+            context_parts.append("")
+        
+        return "\n".join(context_parts)
+    
+    def _parse_follow_up_questions(self, response: str) -> List[str]:
+        """Parse follow-up questions from LLM response"""
+        questions = []
+        
+        # Split by lines and look for questions
+        lines = response.split('\n')
+        
+        for line in lines:
+            line = line.strip()
+            
+            # Skip empty lines and headers
+            if not line or line.startswith('=') or line.startswith('#'):
+                continue
+            
+            # Remove list markers
+            line = re.sub(r'^[-•*\d.]+\s*', '', line)
+            
+            # Check if it's a question
+            if line.endswith('?') and len(line) > 10:
+                # Clean up the question
+                question = line.strip()
+                if question and question not in questions:
+                    questions.append(question)
+        
+        return questions[:4]  # Return max 4 questions
+    
+    def _generate_fallback_follow_up_questions(self, state: ConversationState) -> List[str]:
+        """Generate fallback questions when LLM approach fails"""
+        original_query = state.get('original_query', '').lower()
+        questions = []
+        
+        # Generate based on query type and search results
+        if 'who is' in original_query or 'who are' in original_query:
+            if state.get('search_results'):
+                # Extract name from query for more specific questions
+                name_match = re.search(r'who is\s+([^?]+)', original_query, re.IGNORECASE)
+                if name_match:
+                    name = name_match.group(1).strip()
+                    # Generate smart questions based on what we found in search results
+                    content_analysis = ""
+                    for result in state['search_results'][:2]:
+                        content_analysis += result.get('content', '')[:300]
+                    
+                    questions = []
+                    if 'manager' in content_analysis.lower() or 'floor' in content_analysis.lower():
+                        questions.append(f"What specific responsibilities does {name} have as a manager?")
+                        questions.append(f"Which team members report to {name}?")
+                    if 'building' in content_analysis.lower():
+                        questions.append(f"What other staff work in the same building as {name}?")
+                    if 'contact' in content_analysis.lower() or 'phone' in content_analysis.lower():
+                        questions.append(f"What's the best way to reach {name} for urgent matters?")
+                    if 'certification' in content_analysis.lower():
+                        questions.append(f"What other certifications or qualifications does {name} have?")
+                    
+                    # Fill with generic questions if we don't have enough specific ones
+                    if len(questions) < 3:
+                        questions.extend([
+                            f"What projects is {name} currently working on?",
+                            f"Who are {name}'s key contacts and collaborators?",
+                            f"What is {name}'s availability and working schedule?"
+                        ])
+                    
+                    questions = questions[:4]  # Limit to 4 questions
+                else:
+                    questions = [
+                        "What is their role and main responsibilities?",
+                        "What team or department are they part of?",
+                        "How can I contact them?",
+                        "What are their key qualifications?"
+                    ]
+            else:
+                questions = [
+                    "Can you provide more details about this person?",
+                    "What specific information are you looking for?",
+                    "Would you like me to search for related contacts?",
+                    "Is there a particular context or department you're interested in?"
+                ]
+        
+        elif 'what is' in original_query or 'what are' in original_query:
+            if state.get('search_results'):
+                questions = [
+                    "What are the specific technical details?",
+                    "How is this used in practice?",
+                    "What are the key features or specifications?",
+                    "Are there different types or variations?"
+                ]
+            else:
+                questions = [
+                    "Can you be more specific about what aspect you're interested in?",
+                    "What particular details would be most helpful?",
+                    "Is there a specific context or use case you're considering?",
+                    "Would you like me to search for related information?"
+                ]
+        
+        elif 'how' in original_query:
+            if state.get('search_results'):
+                questions = [
+                    "What are the specific step-by-step instructions?",
+                    "What tools or resources are needed?",
+                    "Are there any prerequisites or requirements?",
+                    "What are common challenges or troubleshooting tips?"
+                ]
+            else:
+                questions = [
+                    "What specific aspect of the process interests you most?",
+                    "Are you looking for general guidance or specific instructions?",
+                    "What's your current level of experience with this?",
+                    "Would you like me to find detailed documentation?"
+                ]
+        
+        else:
+            # Generic questions based on whether we have results
+            if state.get('search_results'):
+                questions = [
+                    "Would you like more detailed information about this topic?",
+                    "Are there specific aspects you'd like me to elaborate on?",
+                    "How does this relate to your specific needs or project?",
+                    "Would you like to explore related topics or concepts?"
+                ]
+            else:
+                questions = [
+                    "Can you provide more specific details about what you're looking for?",
+                    "What particular aspect would be most helpful to know about?",
+                    "Is there additional context that might help me find better information?",
+                    "Would you like me to search for related topics?"
+                ]
+        
+        return questions[:4]  # Return max 4 questions
     
     def _is_complex_correlation_query(self, query: str) -> bool:
         """Determine if a query requires complex data correlation"""

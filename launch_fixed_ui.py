@@ -1532,33 +1532,33 @@ class FixedRAGUI:
     # =================== CONVERSATION METHODS ===================
     
     def start_new_conversation(self) -> Tuple[List[Dict[str, str]], str, str]:
-        """Start a new conversation session"""
+        """Start a new conversation session using the new thread-based API"""
         try:
             response = requests.post(f"{self.api_url}/api/conversation/start", json={})
             
             if response.status_code == 200:
                 data = response.json()
-                session_id = data["session_id"]
-                initial_response = data["response"]
+                thread_id = data.get("thread_id", "")
+                initial_response = data.get("response", "Hello! I'm ready to help you with questions about your documents. What would you like to know?")
                 
-                # Return conversation history, session ID, and status
+                # Return conversation history, thread ID, and status
                 conversation_history = [
                     {"role": "assistant", "content": initial_response}
                 ]
                 
-                return conversation_history, session_id, "✅ New conversation started!"
+                return conversation_history, thread_id, "✅ New conversation started with LangGraph state persistence!"
             elif response.status_code == 404:
                 # Conversation API not available
                 error_msg = """🚧 **Conversation Feature Not Available**
 
 The LangGraph conversation system is not currently available. This could be due to:
 
-• **Missing LangGraph dependencies** - Run: `pip install langgraph`
+• **Missing LangGraph dependencies** - Run: `pip install langgraph langgraph-checkpoint`
 • **Server configuration issue** - Check server logs
 • **API routes not registered** - Restart the RAG server
 
 **To enable conversations:**
-1. Ensure LangGraph is installed: `pip install langgraph>=0.0.40`
+1. Ensure LangGraph is installed: `pip install langgraph>=0.0.40 langgraph-checkpoint>=1.0.0`
 2. Restart the RAG server: `python main.py`
 3. Check server logs for any errors
 
@@ -1576,25 +1576,25 @@ The LangGraph conversation system is not currently available. This could be due 
         except Exception as e:
             error_history = [{"role": "assistant", "content": f"Error: {str(e)}"}]
             return error_history, "", f"❌ Error starting conversation: {str(e)}"
-    
-    def send_conversation_message(self, message: str, session_id: str, history: List[Dict[str, str]]) -> Tuple[str, List[Dict[str, str]], str, Dict[str, Any]]:
-        """Send a message in the conversation with enhanced suggestions"""
+
+    def send_conversation_message(self, message: str, thread_id: str, history: List[Dict[str, str]]) -> Tuple[str, List[Dict[str, str]], str, Dict[str, Any]]:
+        """Send a message in the conversation with enhanced suggestions using thread_id"""
         if not message.strip():
             return "", history, "Please enter a message", {}
         
-        if not session_id or session_id == "No session":
+        if not thread_id or thread_id == "No thread":
             history.append({"role": "user", "content": message})
             history.append({"role": "assistant", "content": "Please start a new conversation first"})
-            return "", history, "No active session", {}
+            return "", history, "No active thread", {}
         
         try:
             # Add user message to history
             history.append({"role": "user", "content": message})
             
-            # Send to API
+            # Send to API using thread_id
             response = requests.post(
                 f"{self.api_url}/api/conversation/message",
-                json={"message": message, "session_id": session_id}
+                json={"message": message, "thread_id": thread_id}
             )
             
             if response.status_code == 200:
@@ -1613,12 +1613,12 @@ The LangGraph conversation system is not currently available. This could be due 
                 if data.get('confidence_score'):
                     info_parts.append(f"Confidence: {data['confidence_score']:.2f}")
                 
-                session_info = " | ".join(info_parts) if info_parts else "Active conversation"
+                thread_info = " | ".join(info_parts) if info_parts else "Active conversation"
                 
                 # Extract enhanced response data for UI
                 enhanced_data = self._extract_enhanced_response_data(data)
                 
-                return "", history, f"✅ {session_info}", enhanced_data
+                return "", history, f"✅ {thread_info}", enhanced_data
             elif response.status_code == 404:
                 error_msg = "🚧 Conversation API not available. Please use the Query Testing tab for Q&A functionality."
                 history.append({"role": "assistant", "content": error_msg})
@@ -1728,13 +1728,13 @@ The LangGraph conversation system is not currently available. This could be due 
         
         return hints[:3]  # Limit to 3 hints
     
-    def end_conversation(self, session_id: str) -> Tuple[List[Dict[str, str]], str, str]:
-        """End the current conversation"""
-        if not session_id or session_id == "No session":
+    def end_conversation(self, thread_id: str) -> Tuple[List[Dict[str, str]], str, str]:
+        """End the current conversation using thread_id"""
+        if not thread_id or thread_id == "No thread":
             return [], "", "No active conversation to end"
         
         try:
-            response = requests.post(f"{self.api_url}/api/conversation/end/{session_id}")
+            response = requests.post(f"{self.api_url}/api/conversation/end/{thread_id}")
             
             if response.status_code == 200:
                 data = response.json()
@@ -1748,24 +1748,24 @@ The LangGraph conversation system is not currently available. This could be due 
                 
                 return end_history, "", f"✅ Conversation ended - {total_turns} turns"
             else:
-                return [], session_id, f"❌ Failed to end conversation: {response.status_code}"
+                return [], thread_id, f"❌ Failed to end conversation: {response.status_code}"
                 
         except requests.exceptions.RequestException as e:
-            return [], session_id, f"❌ Connection error: {str(e)}"
+            return [], thread_id, f"❌ Connection error: {str(e)}"
         except Exception as e:
-            return [], session_id, f"❌ Error ending conversation: {str(e)}"
+            return [], thread_id, f"❌ Error ending conversation: {str(e)}"
     
-    def get_conversation_status(self, session_id: str) -> str:
-        """Get current conversation status"""
-        if not session_id or session_id == "No session":
+    def get_conversation_status(self, thread_id: str) -> str:
+        """Get current conversation status using thread_id"""
+        if not thread_id or thread_id == "No thread":
             return "No active conversation"
         
         try:
-            response = requests.get(f"{self.api_url}/api/conversation/history/{session_id}")
+            response = requests.get(f"{self.api_url}/api/conversation/history/{thread_id}")
             
             if response.status_code == 200:
                 data = response.json()
-                return f"Session: {session_id[:8]}... | Turns: {data.get('turn_count', 0)} | Phase: {data.get('current_phase', 'unknown')}"
+                return f"Thread: {thread_id[:8]}... | Turns: {data.get('turn_count', 0)} | Phase: {data.get('current_phase', 'unknown')}"
             else:
                 return f"Error getting status: {response.status_code}"
                 
@@ -1814,6 +1814,13 @@ def create_fixed_interface():
         cursor: pointer;
         transition: all 0.3s ease;
         box-shadow: 0 2px 4px rgba(0,123,255,0.2);
+        white-space: normal;
+        word-wrap: break-word;
+        text-align: left;
+        line-height: 1.3;
+        min-height: 40px;
+        display: flex;
+        align-items: center;
     }
     
     .suggestion-button:hover {
@@ -1905,6 +1912,8 @@ def create_fixed_interface():
         .suggestion-button {
             font-size: 12px;
             padding: 6px 12px;
+            min-height: 35px;
+            line-height: 1.2;
         }
         
         .topic-chip {
@@ -2627,11 +2636,11 @@ def create_fixed_interface():
                     with gr.Column(scale=1):
                         # Enhanced session information
                         with gr.Group():
-                            gr.Markdown("#### ℹ️ Session Info")
+                            gr.Markdown("#### ℹ️ Thread Info")
                             
-                            session_id_display = gr.Textbox(
-                                label="Session ID",
-                                value="No session",
+                            thread_id_display = gr.Textbox(
+                                label="Thread ID",
+                                value="No thread",
                                 interactive=False,
                                 max_lines=1
                             )
@@ -2675,47 +2684,47 @@ def create_fixed_interface():
                         with gr.Group():
                             gr.Markdown("#### 🚀 Enhanced Features")
                             gr.Markdown("""
-                            **Smart Suggestions:**
-                            - 💡 **One-click questions**: Generated based on context
-                            - ⚡ **Quick responses**: Pre-computed answers for common follow-ups
-                            - 🎯 **Prioritized suggestions**: Most relevant questions first
-                            - 🔍 **Context-aware**: Suggestions adapt to conversation flow
-                            
-                            **Topic Exploration:**
-                            - 🏷️ **Topic chips**: Click to explore related areas
-                            - 👥 **Entity cards**: Discover people, places, products
-                            - 🔧 **Technical terms**: Get definitions and explanations
-                            - 📊 **Related areas**: Find connected topics
-                            
-                            **Conversation Intelligence:**
-                            - 📈 **Conversation health**: Real-time quality assessment
-                            - 🎯 **Exploration paths**: Suggested conversation directions
-                            - 💬 **Context retention**: Maintains conversation memory
-                            - 📊 **Turn analytics**: Track conversation depth and coverage
-                            """)
+                                **Smart Suggestions:**
+                                - 💡 **One-click questions**: Generated based on context
+                                - ⚡ **Quick responses**: Pre-computed answers for common follow-ups
+                                - 🎯 **Prioritized suggestions**: Most relevant questions first
+                                - 🔍 **Context-aware**: Suggestions adapt to conversation flow
+                                
+                                **Topic Exploration:**
+                                - 🏷️ **Topic chips**: Click to explore related areas
+                                - 👥 **Entity cards**: Discover people, places, products
+                                - 🔧 **Technical terms**: Get definitions and explanations
+                                - 📊 **Related areas**: Find connected topics
+                                
+                                **Conversation Intelligence:**
+                                - 📈 **Conversation health**: Real-time quality assessment
+                                - 🎯 **Exploration paths**: Suggested conversation directions
+                                - 💬 **Context retention**: Maintains conversation memory
+                                - 📊 **Turn analytics**: Track conversation depth and coverage
+                                """)
                         
                         # Advanced tips
                         with gr.Group():
                             gr.Markdown("#### 💡 Pro Tips")
                             gr.Markdown("""
-                            **Getting Better Suggestions:**
-                            - Ask specific questions about your documents
-                            - Use natural, conversational language
-                            - Build on previous responses for deeper insights
-                            - Click suggestion buttons for instant follow-ups
-                            
-                            **Topic Exploration:**
-                            - Click topic chips to dive deeper
-                            - Explore entities mentioned in responses
-                            - Ask about technical terms for definitions
-                            - Follow suggested exploration paths
-                            
-                            **Conversation Flow:**
-                            - Start with broad questions, then get specific
-                            - Use clarification suggestions when confused
-                            - Explore related topics for comprehensive understanding
-                            - End conversations when you have what you need
-                            """)
+                                **Getting Better Suggestions:**
+                                - Ask specific questions about your documents
+                                - Use natural, conversational language
+                                - Build on previous responses for deeper insights
+                                - Click suggestion buttons for instant follow-ups
+                                
+                                **Topic Exploration:**
+                                - Click topic chips to dive deeper
+                                - Explore entities mentioned in responses
+                                - Ask about technical terms for definitions
+                                - Follow suggested exploration paths
+                                
+                                **Conversation Flow:**
+                                - Start with broad questions, then get specific
+                                - Use clarification suggestions when confused
+                                - Explore related topics for comprehensive understanding
+                                - End conversations when you have what you need
+                                """)
                         
                         # Debug information (collapsible)
                         with gr.Accordion("🔧 Debug Info", open=False):
@@ -3322,8 +3331,8 @@ def create_fixed_interface():
         # Enhanced conversation event handlers
         def start_conversation_and_update():
             """Start a new conversation and update UI"""
-            history, session_id, status = ui.start_new_conversation()
-            conversation_status_text = ui.get_conversation_status(session_id)
+            history, thread_id, status = ui.start_new_conversation()
+            conversation_status_text = ui.get_conversation_status(thread_id)
             
             # Clear all suggestion elements
             suggestion_updates = [
@@ -3334,16 +3343,16 @@ def create_fixed_interface():
             ]
             
             return (
-                history, session_id, status, conversation_status_text,
+                history, thread_id, status, conversation_status_text,
                 "💡 Start a conversation to see personalized hints and suggestions!",
                 "", "", "",  # Clear insights, entity exploration, technical terms
                 {}  # Clear debug info
             ) + tuple(suggestion_updates) + tuple(topic_updates)
         
-        def send_message_and_update(message, session_id, history):
+        def send_message_and_update(message, thread_id, history):
             """Send message and update conversation with enhanced suggestions"""
             try:
-                message_cleared, updated_history, status, enhanced_data = ui.send_conversation_message(message, session_id, history)
+                message_cleared, updated_history, status, enhanced_data = ui.send_conversation_message(message, thread_id, history)
             except Exception as e:
                 # Fallback when conversation API is not available
                 updated_history = history + [
@@ -3361,7 +3370,7 @@ def create_fixed_interface():
                 message_cleared = ""
                 status = f"❌ Conversation API error: {str(e)}"
             
-            conversation_status_text = ui.get_conversation_status(session_id)
+            conversation_status_text = ui.get_conversation_status(thread_id)
             
             # Update suggestion buttons with error handling
             suggestions = enhanced_data.get('suggestions', [])
@@ -3372,10 +3381,28 @@ def create_fixed_interface():
                     if isinstance(suggestion, dict):
                         icon = suggestion.get('icon', '💬')
                         text = suggestion.get('question', suggestion.get('text', ''))
-                        button_text = f"{icon} {text[:50]}..." if text else ""
+                        # Increase character limit and make truncation smarter
+                        if len(text) > 120:
+                            # Try to truncate at word boundary
+                            truncated = text[:120]
+                            last_space = truncated.rfind(' ')
+                            if last_space > 80:  # Only truncate at word if it's not too short
+                                text = truncated[:last_space] + "..."
+                            else:
+                                text = truncated + "..."
+                        button_text = f"{icon} {text}" if text else ""
                     else:
                         # Handle case where suggestion is a string
-                        button_text = f"💬 {str(suggestion)[:50]}..." if suggestion else ""
+                        text = str(suggestion)
+                        if len(text) > 120:
+                            # Try to truncate at word boundary
+                            truncated = text[:120]
+                            last_space = truncated.rfind(' ')
+                            if last_space > 80:  # Only truncate at word if it's not too short
+                                text = truncated[:last_space] + "..."
+                            else:
+                                text = truncated + "..."
+                        button_text = f"💬 {text}" if text else ""
                     
                     if button_text.strip():
                         suggestion_updates.append(gr.update(value=button_text, visible=True))
@@ -3449,9 +3476,9 @@ def create_fixed_interface():
                 enhanced_data  # Debug info
             ) + tuple(suggestion_updates) + tuple(topic_updates)
         
-        def end_conversation_and_update(session_id):
+        def end_conversation_and_update(thread_id):
             """End conversation and update UI"""
-            end_history, cleared_session, status = ui.end_conversation(session_id)
+            end_history, cleared_thread, status = ui.end_conversation(thread_id)
             
             # Clear all UI elements
             suggestion_updates = [
@@ -3462,24 +3489,26 @@ def create_fixed_interface():
             ]
             
             return (
-                end_history, cleared_session, status, "No active conversation",
+                end_history, cleared_thread, status, "No active conversation",
                 "💡 Start a new conversation to see suggestions!",
                 "", "", "",  # Clear insights, entities, terms
                 {}  # Clear debug info
             ) + tuple(suggestion_updates) + tuple(topic_updates)
         
-        def handle_suggestion_click(suggestion_text, session_id, history):
+        def handle_suggestion_click(suggestion_text, thread_id, history):
             """Handle suggestion button click"""
             if not suggestion_text or not suggestion_text.strip():
                 return "", history, "No suggestion selected", {}
             
-            # Extract the actual question from the button text (remove emoji and truncation)
+            # Extract the actual question from the button text (remove emoji and handle truncation)
             clean_question = suggestion_text.split(" ", 1)[1] if " " in suggestion_text else suggestion_text
-            clean_question = clean_question.replace("...", "")
+            # Remove trailing "..." if present from truncation
+            if clean_question.endswith("..."):
+                clean_question = clean_question[:-3].strip()
             
             # Send the suggestion as a message and get the full response
             try:
-                full_response = send_message_and_update(clean_question, session_id, history)
+                full_response = send_message_and_update(clean_question, thread_id, history)
                 # Extract only the first 4 values that match our outputs
                 message_cleared = full_response[0]
                 updated_history = full_response[1] 
@@ -3494,7 +3523,230 @@ def create_fixed_interface():
             except Exception as e:
                 return "", history, f"Error: {str(e)}", {"error": str(e)}
         
-        def handle_topic_click(topic_text, session_id, history):
+        def handle_topic_click(topic_text, thread_id, history):
             """Handle topic chip click"""
+            if not topic_text or not topic_text.strip():
+                return "", history, "No topic selected", {}
+            
+            # Extract topic name and create a question
+            topic_name = topic_text.replace("🔍 ", "")
+            question = f"Tell me more about {topic_name}"
+            
+            # Send the topic exploration question and get the full response
+            try:
+                full_response = send_message_and_update(question, thread_id, history)
+                # Extract only the first 4 values that match our outputs
+                message_cleared = full_response[0]
+                updated_history = full_response[1]
+                status = full_response[2] 
+                debug_data = full_response[8] if len(full_response) > 8 else {}
+                
+                # Ensure debug_data is JSON serializable
+                if not isinstance(debug_data, (dict, list, str, int, float, bool, type(None))):
+                    debug_data = str(debug_data)
+                
+                return message_cleared, updated_history, status, debug_data
+            except Exception as e:
+                return "", history, f"Error: {str(e)}", {"error": str(e)}
+        
+        def clear_suggestions():
+            """Clear all suggestions and reset UI"""
+            suggestion_updates = [
+                gr.update(value="", visible=False) for _ in range(4)
+            ]
+            topic_updates = [
+                gr.update(value="", visible=False) for _ in range(6)
+            ]
+            
+            return (
+                "💡 Suggestions cleared. Continue the conversation for new suggestions!",
+                "", "", "",  # Clear insights, entities, terms
+                {}  # Clear debug info
+            ) + tuple(suggestion_updates) + tuple(topic_updates)
+        
+        # Enhanced conversation tab event handlers
+        start_conversation_btn.click(
+            fn=start_conversation_and_update,
+            outputs=[
+                chatbot, thread_id_display, conversation_status, conversation_status,
+                interaction_hints, conversation_insights, entity_exploration, technical_terms,
+                debug_info,
+                suggestion_btn_1, suggestion_btn_2, suggestion_btn_3, suggestion_btn_4,
+                topic_chip_1, topic_chip_2, topic_chip_3, topic_chip_4, topic_chip_5, topic_chip_6
+            ]
+        )
+        
+        send_button.click(
+            fn=send_message_and_update,
+            inputs=[message_input, thread_id_display, chatbot],
+            outputs=[
+                message_input, chatbot, conversation_status, conversation_status,
+                interaction_hints, conversation_insights, entity_exploration, technical_terms,
+                debug_info,
+                suggestion_btn_1, suggestion_btn_2, suggestion_btn_3, suggestion_btn_4,
+                topic_chip_1, topic_chip_2, topic_chip_3, topic_chip_4, topic_chip_5, topic_chip_6
+            ]
+        )
+        
+        message_input.submit(
+            fn=send_message_and_update,
+            inputs=[message_input, thread_id_display, chatbot],
+            outputs=[
+                message_input, chatbot, conversation_status, conversation_status,
+                interaction_hints, conversation_insights, entity_exploration, technical_terms,
+                debug_info,
+                suggestion_btn_1, suggestion_btn_2, suggestion_btn_3, suggestion_btn_4,
+                topic_chip_1, topic_chip_2, topic_chip_3, topic_chip_4, topic_chip_5, topic_chip_6
+            ]
+        )
+        
+        end_conversation_btn.click(
+            fn=end_conversation_and_update,
+            inputs=[thread_id_display],
+            outputs=[
+                chatbot, thread_id_display, conversation_status, conversation_status,
+                interaction_hints, conversation_insights, entity_exploration, technical_terms,
+                debug_info,
+                suggestion_btn_1, suggestion_btn_2, suggestion_btn_3, suggestion_btn_4,
+                topic_chip_1, topic_chip_2, topic_chip_3, topic_chip_4, topic_chip_5, topic_chip_6
+            ]
+        )
+        
+        clear_suggestions_btn.click(
+            fn=clear_suggestions,
+            outputs=[
+                interaction_hints, conversation_insights, entity_exploration, technical_terms,
+                debug_info,
+                suggestion_btn_1, suggestion_btn_2, suggestion_btn_3, suggestion_btn_4,
+                topic_chip_1, topic_chip_2, topic_chip_3, topic_chip_4, topic_chip_5, topic_chip_6
+            ]
+        )
+        
+        # Suggestion button click handlers
+        for i, btn in enumerate([suggestion_btn_1, suggestion_btn_2, suggestion_btn_3, suggestion_btn_4]):
+            btn.click(
+                fn=handle_suggestion_click,
+                inputs=[btn, thread_id_display, chatbot],
+                outputs=[
+                    message_input, chatbot, conversation_status, debug_info
+                ]
+            )
+        
+        # Topic chip click handlers
+        for i, chip in enumerate([topic_chip_1, topic_chip_2, topic_chip_3, topic_chip_4, topic_chip_5, topic_chip_6]):
+            chip.click(
+                fn=handle_topic_click,
+                inputs=[chip, thread_id_display, chatbot],
+                outputs=[
+                    message_input, chatbot, conversation_status, debug_info
+                ]
+            )
+
+        # Initialize connection status on load
+        interface.load(
+            fn=ui.check_api_connection,
+            outputs=[connection_status]
+        )
+    
+    return interface
+
+def check_server_status(api_url: str = "http://localhost:8000", max_retries: int = 3) -> bool:
+    """Check if the server is running"""
+    for attempt in range(max_retries):
+        try:
+            response = requests.get(f"{api_url}/health", timeout=5)
+            if response.status_code == 200:
+                print(f"✅ Server is running and healthy!")
+                return True
+            else:
+                print(f"❌ Attempt {attempt + 1}/{max_retries}: Server responded with status {response.status_code}")
+        except requests.exceptions.RequestException as e:
+            print(f"❌ Attempt {attempt + 1}/{max_retries}: Server not responding - {e}")
+        
+        if attempt < max_retries - 1:
+            print("⏳ Waiting 2 seconds before retry...")
+            time.sleep(2)
+    
+    return False
+
+def main():
+    """Main function to launch the fixed UI"""
+    print("DEBUG: Starting main() function")
+    
+    # Check server status
+    print("DEBUG: Checking server status...")
+    if not check_server_status():
+        print("❌ Cannot connect to RAG server. Please ensure the server is running on http://localhost:8000")
+        print("   Start the server with: python main.py")
+        return
+    
+    print("DEBUG: Server is running, proceeding with UI creation...")
+    
+    # Create and launch interface
+    print("🎛️ Creating fixed interface...")
+    print("DEBUG: About to call create_fixed_interface()")
+    interface = create_fixed_interface()
+    print("DEBUG: Interface created successfully")
+    
+    print("""
+🌟 FIXED DOCUMENT LIFECYCLE MANAGEMENT UI
+==================================================
+🌐 API Server: http://localhost:8000
+🎛️ Fixed UI: http://localhost:7869
+📁 Key Improvements:
+  ✅ Smart Upload/Update (single interface)
+  ✅ Auto-refresh dropdowns
+  ✅ Clear status messages
+  ✅ Upload counter tracking
+  ✅ Better user experience
+💬 UPDATED: Enhanced Conversational Chat with LangGraph State Persistence
+  ✅ Multi-turn conversations with persistent state
+  ✅ Thread-based conversation management
+  ✅ Smart suggestion buttons
+  ✅ Interactive topic exploration
+  ✅ Real-time conversation insights
+  ✅ LangGraph state checkpointer integration
+🎯 Test the improved Upload → Update → Delete → Query → Chat workflow!
+   No more confusion about upload vs update!
+Ready to launch! Press Ctrl+C to stop the UI
+==================================================
+""")
+    
+    print("DEBUG: About to launch interface on port 7869")
+    try:
+        # Try with specific port first
+        interface.launch(
+            server_port=7869,
+            share=False,
+            show_error=True,
+            inbrowser=True,
+            prevent_thread_lock=False
+        )
+    except ValueError as ve:
+        print(f"❌ ValueError on port 7869: {ve}")
+        print("🔄 Trying with auto port selection...")
+        try:
+            interface.launch(
+                share=False,
+                show_error=True,
+                inbrowser=True,
+                prevent_thread_lock=False
+            )
+        except Exception as e2:
+            print(f"❌ Auto port launch failed: {e2}")
+            print("🔧 Trying minimal launch configuration...")
+            try:
+                interface.launch(
+                    show_error=True
+                )
+            except Exception as e3:
+                print(f"❌ All launch attempts failed: {e3}")
+                print("💡 Please try running: gradio --version")
+                print("💡 Or try: pip install --upgrade gradio")
+    except Exception as e:
+        print(f"❌ Unexpected error: {e}")
+        print("🔄 Trying basic launch...")
+        interface.launch()
+
 if __name__ == "__main__":
     main()
