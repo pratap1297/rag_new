@@ -56,6 +56,41 @@ class IngestionEngine:
         except Exception as e:
             logging.warning(f"Failed to register Excel processor: {e}")
     
+    def _generate_doc_id(self, metadata: Dict[str, Any]) -> str:
+        """Generate a proper document ID based on available metadata"""
+        # Priority 1: Use doc_path if available (most reliable)
+        if metadata.get('doc_path'):
+            doc_path = metadata['doc_path']
+            # Remove leading slash and convert to proper ID format
+            if doc_path.startswith('/'):
+                doc_path = doc_path[1:]
+            return doc_path.replace('/', '_').replace(' ', '_')
+        
+        # Priority 2: Use filename if available
+        if metadata.get('filename'):
+            filename = metadata['filename']
+            # Remove extension and clean up
+            if '.' in filename:
+                filename = filename.rsplit('.', 1)[0]
+            return f"docs_{filename.replace(' ', '_').replace('-', '_')}"
+        
+        # Priority 3: Use file_name from file_path
+        if metadata.get('file_name'):
+            file_name = metadata['file_name']
+            if '.' in file_name:
+                file_name = file_name.rsplit('.', 1)[0]
+            return f"docs_{file_name.replace(' ', '_').replace('-', '_')}"
+        
+        # Priority 4: Generate from file_path
+        if metadata.get('file_path'):
+            file_path = Path(metadata['file_path'])
+            stem = file_path.stem
+            return f"docs_{stem.replace(' ', '_').replace('-', '_')}"
+        
+        # Fallback: Generate a unique ID
+        import uuid
+        return f"docs_{uuid.uuid4().hex[:8]}"
+    
     def ingest_file(self, file_path: str, metadata: Dict[str, Any] = None) -> Dict[str, Any]:
         """Ingest a single file"""
         file_path = Path(file_path)
@@ -113,10 +148,15 @@ class IngestionEngine:
             
             # Prepare chunk metadata for FAISS
             chunk_metadata_list = []
+            
+            # Generate a proper doc_id based on available metadata
+            doc_id = self._generate_doc_id(file_metadata)
+            
             for chunk, embedding in zip(chunks, embeddings):
                 chunk_meta = {
                     'text': chunk['text'],
                     'chunk_index': chunk['chunk_index'],
+                    'doc_id': doc_id,  # Explicitly set doc_id
                     **chunk['metadata'],  # Flatten the chunk metadata
                     **file_metadata  # Include file-level metadata (including doc_path)
                 }

@@ -3,8 +3,11 @@ Conversation API Routes
 FastAPI endpoints for LangGraph conversation management with state persistence
 """
 import logging
-from typing import Dict, Any, Optional, List
+import json
+import asyncio
+from typing import Dict, Any, Optional, List, AsyncGenerator
 from fastapi import APIRouter, HTTPException, Depends, BackgroundTasks
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 # Create router
@@ -121,6 +124,108 @@ async def send_message(
     except Exception as e:
         logger.error(f"Error processing message: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to process message: {str(e)}")
+
+@router.post("/message/stream")
+async def send_message_stream(
+    request: ConversationMessageRequest,
+    background_tasks: BackgroundTasks,
+    manager = Depends(get_conversation_manager)
+):
+    """Send a message in an existing conversation with streaming response"""
+    
+    async def generate_stream() -> AsyncGenerator[str, None]:
+        """Generate streaming response for conversation"""
+        try:
+            # Use thread_id if provided, otherwise fall back to session_id for backward compatibility
+            thread_id = request.thread_id or request.session_id
+            
+            if not thread_id:
+                yield f"data: {json.dumps({'error': 'Either thread_id or session_id must be provided'})}\n\n"
+                return
+            
+            # Send initial status
+            yield f"data: {json.dumps({'type': 'status', 'message': 'Processing your message...'})}\n\n"
+            
+            # Process the message (this will be the complete response for now)
+            # In the future, we can modify the conversation manager to support streaming
+            response = manager.process_user_message(thread_id, request.message)
+            
+            # Validate response structure
+            if 'error' in response:
+                yield f"data: {json.dumps({'type': 'error', 'message': response['error']})}\n\n"
+                return
+            
+            # Stream the response in chunks
+            full_response = response.get('response', '')
+            
+            # Send metadata first
+            metadata = {
+                'type': 'metadata',
+                'thread_id': response.get('thread_id', thread_id),
+                'conversation_id': response.get('conversation_id', ''),
+                'turn_count': response.get('turn_count', 0),
+                'current_phase': response.get('current_phase', ''),
+                'confidence_score': response.get('confidence_score', 0.0),
+                'timestamp': response.get('timestamp', ''),
+                'total_sources': response.get('total_sources', 0)
+            }
+            yield f"data: {json.dumps(metadata)}\n\n"
+            
+            # Stream the response text in chunks
+            chunk_size = 50  # Characters per chunk
+            for i in range(0, len(full_response), chunk_size):
+                chunk = full_response[i:i + chunk_size]
+                chunk_data = {
+                    'type': 'content',
+                    'chunk': chunk,
+                    'chunk_index': i // chunk_size,
+                    'is_final': i + chunk_size >= len(full_response)
+                }
+                yield f"data: {json.dumps(chunk_data)}\n\n"
+                
+                # Add small delay to simulate streaming
+                await asyncio.sleep(0.1)
+            
+            # Send suggestions and related topics
+            if response.get('suggested_questions'):
+                suggestions_data = {
+                    'type': 'suggestions',
+                    'suggested_questions': response['suggested_questions']
+                }
+                yield f"data: {json.dumps(suggestions_data)}\n\n"
+            
+            if response.get('related_topics'):
+                topics_data = {
+                    'type': 'topics',
+                    'related_topics': response['related_topics']
+                }
+                yield f"data: {json.dumps(topics_data)}\n\n"
+            
+            if response.get('sources'):
+                sources_data = {
+                    'type': 'sources',
+                    'sources': response['sources']
+                }
+                yield f"data: {json.dumps(sources_data)}\n\n"
+            
+            # Send completion signal
+            yield f"data: {json.dumps({'type': 'complete'})}\n\n"
+            
+        except HTTPException as he:
+            yield f"data: {json.dumps({'type': 'error', 'message': str(he.detail)})}\n\n"
+        except Exception as e:
+            logger.error(f"Error in streaming message: {e}")
+            yield f"data: {json.dumps({'type': 'error', 'message': f'Failed to process message: {str(e)}'})}\n\n"
+    
+    return StreamingResponse(
+        generate_stream(),
+        media_type="text/plain",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "Content-Type": "text/event-stream"
+        }
+    )
 
 @router.get("/history/{thread_id}", response_model=ConversationHistoryResponse)
 async def get_conversation_history(

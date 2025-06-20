@@ -28,6 +28,145 @@ class FixedRAGUI:
         
         print(f"DEBUG: FixedRAGUI initialized with API URL: {api_url}")
         
+        # Automatically sync registry with vector store on startup
+        self._auto_sync_registry()
+        
+    def _auto_sync_registry(self):
+        """Automatically sync registry with vector store on startup"""
+        try:
+            print("DEBUG: Auto-syncing registry with vector store...")
+            
+            # First try to get documents from the API
+            response = requests.get(f"{self.api_url}/documents", timeout=10)
+            documents_by_path = {}
+            
+            if response.status_code == 200:
+                data = response.json()
+                document_details = data.get('document_details', [])
+                
+                print(f"DEBUG: Retrieved {len(document_details)} document details from API")
+                
+                # Process API documents
+                for doc_detail in document_details:
+                    doc_id = doc_detail.get('doc_id', 'unknown')
+                    doc_path = doc_detail.get('doc_path', '')
+                    filename = doc_detail.get('filename', '')
+                    upload_timestamp = doc_detail.get('upload_timestamp', '')
+                    source = doc_detail.get('source', 'unknown')
+                    chunks = doc_detail.get('chunks', 0)
+                    
+                    # Create registry path with better chunk handling
+                    if doc_path and doc_path != '':
+                        registry_path = doc_path
+                    elif filename and filename != '':
+                        registry_path = f"/docs/{os.path.splitext(filename)[0]}"
+                    else:
+                        if '_chunk_' in doc_id:
+                            # For chunk-based documents, create a base path without chunk suffix
+                            base_name = doc_id.split('_chunk_')[0]
+                            registry_path = f"/{base_name}"
+                        else:
+                            registry_path = f"/{doc_id}"
+                    
+                    # Add to registry with proper chunk grouping
+                    if registry_path in documents_by_path:
+                        # Update existing document entry
+                        documents_by_path[registry_path]['chunks'] += chunks if chunks > 0 else 1
+                        documents_by_path[registry_path]['chunk_docs'].append(doc_id)
+                        # Update timestamp if newer
+                        if upload_timestamp and upload_timestamp > documents_by_path[registry_path]['last_updated']:
+                            documents_by_path[registry_path]['last_updated'] = upload_timestamp
+                    else:
+                        # Create new document entry
+                        display_filename = filename if filename else os.path.basename(registry_path)
+                        if not display_filename or display_filename == registry_path:
+                            if '_chunk_' in doc_id:
+                                # For chunk-based docs, create a meaningful filename
+                                base_name = doc_id.split('_chunk_')[0]
+                                display_filename = base_name.replace('_', ' ').replace('docs ', '').title()
+                            else:
+                                display_filename = f"{doc_id}.txt"
+                        
+                        documents_by_path[registry_path] = {
+                            'status': 'active',
+                            'upload_count': 1,
+                            'last_updated': upload_timestamp or datetime.now().isoformat(),
+                            'filename': display_filename,
+                            'original_filename': filename,
+                            'chunks': chunks if chunks > 0 else 1,
+                            'source': source or 'auto_sync',
+                            'doc_id': doc_id,
+                            'chunk_docs': [doc_id]
+                        }
+            
+            # Also discover documents via search to catch "unknown" docs
+            print("DEBUG: Discovering additional documents via search...")
+            search_queries = [
+                "Building", "network", "facility", "manager", "roster", "excel", 
+                "pdf", "document", "layout", "floor", "equipment"
+            ]
+            
+            discovered_files = set()
+            
+            for query in search_queries:
+                try:
+                    search_response = requests.post(
+                        f"{self.api_url}/query",
+                        json={"query": query, "max_results": 20, "include_metadata": True},
+                        timeout=10
+                    )
+                    
+                    if search_response.status_code == 200:
+                        search_data = search_response.json()
+                        sources = search_data.get('sources', [])
+                        
+                        for source in sources:
+                            metadata = source.get('metadata', {})
+                            filename = metadata.get('filename', metadata.get('original_filename', ''))
+                            
+                            if filename and filename not in discovered_files:
+                                discovered_files.add(filename)
+                                
+                                # Create registry entry for discovered file
+                                registry_path = f"/docs/{os.path.splitext(filename)[0]}"
+                                
+                                if registry_path not in documents_by_path:
+                                    documents_by_path[registry_path] = {
+                                        'status': 'active',
+                                        'upload_count': 1,
+                                        'last_updated': datetime.now().isoformat(),
+                                        'filename': filename,
+                                        'original_filename': filename,
+                                        'chunks': 1,  # We'll update this if we find more
+                                        'source': 'search_discovery',
+                                        'doc_id': source.get('doc_id', 'unknown'),
+                                        'chunk_docs': [source.get('doc_id', 'unknown')]
+                                    }
+                                else:
+                                    # Update chunk count
+                                    documents_by_path[registry_path]['chunks'] += 1
+                                    
+                except Exception as search_error:
+                    print(f"DEBUG: Search discovery error for '{query}': {str(search_error)}")
+                    continue
+            
+            print(f"DEBUG: Discovered {len(discovered_files)} additional files via search")
+            
+            # Add documents to registry
+            self.document_registry.clear()
+            for doc_path, doc_info in documents_by_path.items():
+                self.document_registry[doc_path] = doc_info
+            
+            print(f"DEBUG: Auto-synced {len(documents_by_path)} documents to registry")
+            for path, info in documents_by_path.items():
+                print(f"DEBUG:   - {path} -> {info['filename']} ({info['chunks']} chunks)")
+                    
+        except Exception as e:
+            print(f"DEBUG: Auto-sync failed: {str(e)}")
+            import traceback
+            print(f"DEBUG: Auto-sync error details: {traceback.format_exc()}")
+            # Don't fail initialization if sync fails
+
     def check_api_connection(self) -> str:
         """Check if the API is accessible"""
         try:
@@ -159,13 +298,22 @@ class FixedRAGUI:
             registry_display = self._format_document_registry()
             return error_msg, registry_display, []
 
-    def delete_document(self, doc_path: str) -> Tuple[str, str, List[str]]:
+    def delete_document(self, doc_path_display: str) -> Tuple[str, str, List[str]]:
         """Delete a document from the system"""
-        if not doc_path or not doc_path.strip():
+        if not doc_path_display or not doc_path_display.strip():
             return "❌ Please select a document from the dropdown to delete", "", []
         
-        if doc_path == "No documents uploaded" or doc_path == "(No documents uploaded yet)":
+        if doc_path_display == "No documents uploaded" or doc_path_display == "(No documents uploaded yet)":
             return "❌ No documents available to delete. Please upload a document first.", "", []
+        
+        # Extract actual doc_path from display name
+        # Format is either "filename (path)" or just "path"
+        if " (" in doc_path_display and doc_path_display.endswith(")"):
+            # Extract path from "filename (path)" format
+            doc_path = doc_path_display.split(" (")[-1][:-1]  # Remove the closing parenthesis
+        else:
+            # It's just the path
+            doc_path = doc_path_display
         
         if doc_path not in self.document_registry:
             available_docs = list(self.document_registry.keys())
@@ -209,7 +357,12 @@ class FixedRAGUI:
             result = f"✅ **Document Deletion Processed**\n\n"
             result += f"📄 **Document Path:** `{doc_path}`\n"
             result += f"📁 **Original File:** `{doc_info.get('filename', doc_info.get('original_filename', 'Unknown'))}`\n"
-            result += f"🆔 **Document ID:** `{doc_id}`\n"
+            # Enhanced document ID display for deletion
+            if doc_id == 'unknown':
+                filename = doc_info.get('filename', doc_info.get('original_filename', 'Unknown'))
+                result += f"🆔 **Document ID:** `{filename}` (Vector ID: unknown)\n"
+            else:
+                result += f"🆔 **Document ID:** `{doc_id}`\n"
             result += f"🗑️ **Deleted:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
             
             if deletion_success:
@@ -236,19 +389,34 @@ class FixedRAGUI:
             return f"❌ **Error:** {str(e)}", "", []
 
     def get_document_paths(self) -> List[str]:
-        """Get list of document paths for dropdown"""
+        """Get list of document paths for dropdown with friendly names"""
         # Only return active and updated documents (not deleted ones)
-        paths = [str(path) for path, info in self.document_registry.items() 
-                if info.get("status") != "deleted"]
-        print(f"DEBUG: Registry has {len(self.document_registry)} total documents, {len(paths)} active: {paths}")
+        active_docs = [(path, info) for path, info in self.document_registry.items() 
+                      if info.get("status") != "deleted"]
         
-        # Ensure we always return a list of strings
-        if not paths:
+        if not active_docs:
             return ["(No documents uploaded yet)"]
         
-        # Filter out any None or empty values and ensure all are strings
-        valid_paths = [str(path) for path in paths if path and str(path).strip()]
-        return valid_paths if valid_paths else ["(No documents uploaded yet)"]
+        # Create user-friendly dropdown options
+        dropdown_options = []
+        for doc_path, info in active_docs:
+            filename = info.get('filename', info.get('original_filename', ''))
+            
+            # Create a display name that shows both filename and path
+            if filename and filename != 'Unknown' and filename != os.path.basename(doc_path):
+                # Show filename with path in parentheses
+                display_name = f"{filename} ({doc_path})"
+            else:
+                # Just show the path if no meaningful filename
+                display_name = doc_path
+            
+            dropdown_options.append(display_name)
+        
+        print(f"DEBUG: Registry has {len(self.document_registry)} total documents, {len(dropdown_options)} active")
+        for i, option in enumerate(dropdown_options):
+            print(f"DEBUG:   {i+1}. {option}")
+        
+        return dropdown_options if dropdown_options else ["(No documents uploaded yet)"]
 
     def _format_document_registry(self) -> str:
         """Format the document registry for display"""
@@ -264,11 +432,50 @@ class FixedRAGUI:
                 "deleted": "🗑️"
             }.get(info.get("status", "unknown"), "❓")
             
-            registry_text += f"{status_emoji} **{doc_path}**\n"
-            registry_text += f"   📁 File: {info.get('filename', info.get('original_filename', 'Unknown'))}\n"
-            registry_text += f"   📝 Chunks: {info.get('chunks', info.get('chunks_created', 0))}\n"
-            registry_text += f"   📅 Last Updated: {info.get('last_updated', 'Unknown')}\n"
+            # Get the best display name
+            filename = info.get('filename', info.get('original_filename', 'Unknown'))
+            
+            # Create a more user-friendly display
+            if filename != 'Unknown' and filename != os.path.basename(doc_path):
+                registry_text += f"{status_emoji} **{filename}**\n"
+                registry_text += f"   📄 Path: `{doc_path}`\n"
+            else:
+                registry_text += f"{status_emoji} **{doc_path}**\n"
+            
+            registry_text += f"   📁 File: {filename}\n"
+            
+            # Show chunks count more clearly
+            chunks = info.get('chunks', info.get('chunks_created', 0))
+            if isinstance(chunks, int):
+                registry_text += f"   📝 Chunks: {chunks}\n"
+            else:
+                registry_text += f"   📝 Chunks: {chunks}\n"
+            
+            # Format timestamp better
+            last_updated = info.get('last_updated', 'Unknown')
+            if last_updated != 'Unknown':
+                try:
+                    from datetime import datetime
+                    dt = datetime.fromisoformat(last_updated.replace('Z', '+00:00'))
+                    formatted_time = dt.strftime('%Y-%m-%d %H:%M:%S')
+                    registry_text += f"   📅 Last Updated: {formatted_time}\n"
+                except:
+                    registry_text += f"   📅 Last Updated: {last_updated}\n"
+            else:
+                registry_text += f"   📅 Last Updated: {last_updated}\n"
+            
             registry_text += f"   📊 Status: {info.get('status', 'unknown').upper()}\n"
+            
+            # Show source information
+            source = info.get('source', 'unknown')
+            source_emoji = {
+                'fixed_ui': '🖥️',
+                'folder_monitor': '📁',
+                'api': '🔌',
+                'auto_sync': '🔄'
+            }.get(source, '📋')
+            registry_text += f"   {source_emoji} Source: {source.replace('_', ' ').title()}\n"
+            
             registry_text += f"   📈 Upload Count: {info.get('upload_count', 1)}\n"
             
             # Optional fields
@@ -279,6 +486,10 @@ class FixedRAGUI:
             
             if info.get("status") == "deleted" and "deleted_at" in info:
                 registry_text += f"   🗑️ Deleted: {info['deleted_at']}\n"
+            
+            # Show chunk document IDs for debugging (if available)
+            if info.get('chunk_docs') and len(info.get('chunk_docs', [])) > 1:
+                registry_text += f"   🔗 Chunk IDs: {len(info['chunk_docs'])} chunks\n"
             
             registry_text += "\n"
         
@@ -369,12 +580,47 @@ class FixedRAGUI:
                         registry_match = None
                         for doc_path, info in self.document_registry.items():
                             info_doc_id = info.get("doc_id", "")
-                            if doc_id.startswith(doc_path) or info_doc_id == doc_id or doc_id.startswith(info_doc_id):
+                            
+                            # Enhanced matching logic for chunk-based documents
+                            doc_id_matches = False
+                            
+                            # Direct match
+                            if doc_id == info_doc_id:
+                                doc_id_matches = True
+                            # Chunk-based matching (e.g., doc_id contains chunk info)
+                            elif '_chunk_' in doc_id:
+                                base_doc_id = doc_id.split('_chunk_')[0]
+                                if base_doc_id in doc_path or doc_path.endswith(base_doc_id):
+                                    doc_id_matches = True
+                            # Path-based matching
+                            elif doc_id.startswith(doc_path) or doc_path.startswith(doc_id):
+                                doc_id_matches = True
+                            # Registry path matching (remove leading slash for comparison)
+                            elif doc_path.lstrip('/') in doc_id or doc_id in doc_path.lstrip('/'):
+                                doc_id_matches = True
+                            
+                            if doc_id_matches:
                                 registry_match = (doc_path, info)
                                 break
                         
                         sources_text += f"**Source {i}** (Score: {score:.3f})\n"
-                        sources_text += f"Document ID: `{doc_id}`\n"
+                        
+                        # Enhanced document ID display
+                        if doc_id == 'unknown' and registry_match:
+                            # Use registry information for better document identification
+                            doc_path, info = registry_match
+                            filename = info.get('filename', info.get('original_filename', 'Unknown'))
+                            sources_text += f"Document ID: `{filename}` (Registry: `{doc_path}`)\n"
+                        elif doc_id == 'unknown':
+                            # Try to extract meaningful info from metadata
+                            metadata = source.get('metadata', {})
+                            filename = metadata.get('filename', metadata.get('original_filename', ''))
+                            if filename:
+                                sources_text += f"Document ID: `{filename}` (Vector ID: unknown)\n"
+                            else:
+                                sources_text += f"Document ID: `unknown` ⚠️\n"
+                        else:
+                            sources_text += f"Document ID: `{doc_id}`\n"
                         
                         if is_deletion_marker:
                             sources_text += f"🗑️ **DELETION MARKER** - This document was deleted\n"
@@ -1771,6 +2017,143 @@ The LangGraph conversation system is not currently available. This could be due 
                 
         except Exception as e:
             return f"Status unavailable: {str(e)}"
+    
+    def send_conversation_message_stream(self, message: str, thread_id: str, history: List[Dict[str, str]]) -> Tuple[str, List[Dict[str, str]], str, Dict[str, Any]]:
+        """Send a message in the conversation with streaming response using thread_id"""
+        if not message.strip():
+            return "", history, "Please enter a message", {}
+        
+        if not thread_id or thread_id == "No thread":
+            history.append({"role": "user", "content": message})
+            history.append({"role": "assistant", "content": "Please start a new conversation first"})
+            return "", history, "No active thread", {}
+        
+        try:
+            import json
+            
+            # Add user message to history
+            history.append({"role": "user", "content": message})
+            
+            # Send to streaming API using thread_id
+            response = requests.post(
+                f"{self.api_url}/api/conversation/message/stream",
+                json={"message": message, "thread_id": thread_id},
+                stream=True,
+                headers={"Accept": "text/event-stream"}
+            )
+            
+            if response.status_code == 200:
+                # Process streaming response
+                assistant_response = ""
+                metadata = {}
+                enhanced_data = {
+                    'suggestions': [],
+                    'topics': [],
+                    'entities': [],
+                    'technical_terms': [],
+                    'insights': {},
+                    'hints': []
+                }
+                
+                # Process each chunk from the stream
+                for line in response.iter_lines(decode_unicode=True):
+                    if line.startswith('data: '):
+                        try:
+                            data = json.loads(line[6:])  # Remove 'data: ' prefix
+                            
+                            if data.get('type') == 'status':
+                                # Status update - could show in UI
+                                continue
+                                
+                            elif data.get('type') == 'metadata':
+                                # Store metadata for later use
+                                metadata = data
+                                
+                            elif data.get('type') == 'content':
+                                # Accumulate response chunks
+                                chunk = data.get('chunk', '')
+                                assistant_response += chunk
+                                
+                            elif data.get('type') == 'suggestions':
+                                # Process suggestions
+                                suggestions = data.get('suggested_questions', [])
+                                processed_suggestions = []
+                                for suggestion in suggestions[:4]:
+                                    if isinstance(suggestion, str):
+                                        processed_suggestions.append({
+                                            'question': suggestion,
+                                            'icon': '💬',
+                                            'priority': 0.5,
+                                            'has_quick_answer': False
+                                        })
+                                    else:
+                                        processed_suggestions.append(suggestion)
+                                enhanced_data['suggestions'] = processed_suggestions
+                                
+                            elif data.get('type') == 'topics':
+                                # Process topics
+                                enhanced_data['topics'] = data.get('related_topics', [])[:6]
+                                
+                            elif data.get('type') == 'sources':
+                                # Process sources
+                                sources = data.get('sources', [])
+                                enhanced_data['sources'] = sources
+                                
+                            elif data.get('type') == 'complete':
+                                # Streaming complete
+                                break
+                                
+                            elif data.get('type') == 'error':
+                                # Handle error
+                                error_msg = data.get('message', 'Unknown error occurred')
+                                history.append({"role": "assistant", "content": f"Error: {error_msg}"})
+                                return "", history, f"❌ Streaming Error: {error_msg}", {}
+                                
+                        except json.JSONDecodeError:
+                            # Skip malformed JSON
+                            continue
+                
+                # Add complete assistant response to history
+                if assistant_response:
+                    history.append({"role": "assistant", "content": assistant_response})
+                else:
+                    history.append({"role": "assistant", "content": "No response generated"})
+                
+                # Format additional info from metadata
+                info_parts = []
+                if metadata.get('turn_count'):
+                    info_parts.append(f"Turn: {metadata['turn_count']}")
+                if metadata.get('current_phase'):
+                    info_parts.append(f"Phase: {metadata['current_phase']}")
+                if metadata.get('confidence_score'):
+                    info_parts.append(f"Confidence: {metadata['confidence_score']:.2f}")
+                
+                thread_info = " | ".join(info_parts) if info_parts else "Active conversation (streamed)"
+                
+                # Generate interaction hints
+                hints = []
+                if enhanced_data.get('suggestions'):
+                    hints.append("💡 Click the suggestion buttons below for quick follow-up questions")
+                if metadata.get('total_sources', 0) > 0:
+                    hints.append(f"📚 Found {metadata['total_sources']} relevant sources")
+                enhanced_data['hints'] = hints[:3]
+                
+                return "", history, f"✅ {thread_info}", enhanced_data
+                
+            elif response.status_code == 404:
+                error_msg = "🚧 Conversation streaming API not available. Using regular API..."
+                # Fallback to regular API
+                return self.send_conversation_message(message, thread_id, history[:-1])  # Remove user message added above
+            else:
+                history.append({"role": "assistant", "content": f"Streaming Error: {response.status_code}"})
+                return "", history, f"❌ Streaming API Error: {response.status_code}", {}
+                
+        except requests.exceptions.RequestException as e:
+            # Fallback to regular API on connection error
+            return self.send_conversation_message(message, thread_id, history[:-1])  # Remove user message added above
+        except Exception as e:
+            history.append({"role": "assistant", "content": f"Streaming Error: {str(e)}"})
+            return "", history, f"❌ Streaming Error: {str(e)}", {}
 
 def create_fixed_interface():
     """Create the fixed document lifecycle management interface"""
@@ -1975,7 +2358,7 @@ def create_fixed_interface():
                         gr.Markdown("#### 🗑️ Delete Document")
                         delete_doc_path_input = gr.Dropdown(
                             label="📄 Select Document to Delete",
-                            choices=["(No documents uploaded yet)"],
+                            choices=ui.get_document_paths(),
                             allow_custom_value=False,
                             info="Choose from uploaded documents"
                         )
@@ -2010,7 +2393,7 @@ def create_fixed_interface():
                         
                         document_registry_display = gr.Markdown(
                             label="Active Documents",
-                            value="📋 No documents in registry",
+                            value=ui._format_document_registry(),
                             height=600
                         )
                         
@@ -2155,7 +2538,7 @@ def create_fixed_interface():
                         
                         document_selection_dropdown = gr.Dropdown(
                             label="Select Document to Delete",
-                            choices=["No documents available"],
+                            choices=ui.get_document_paths_from_overview(),
                             value=None,
                             interactive=True,
                             info="Choose a document to permanently delete"
@@ -2580,6 +2963,15 @@ def create_fixed_interface():
                 - 📊 **Conversation analytics** and session management
                 - ⚡ **Quick actions** and contextual hints
                 """)
+                
+                # Streaming toggle
+                with gr.Row():
+                    gr.Markdown("**⚡ Response Mode:**")
+                    streaming_toggle = gr.Checkbox(
+                        label="🌊 Enable Streaming Responses",
+                        value=True,
+                        info="Stream responses in real-time for better user experience"
+                    )
                 
                 with gr.Row():
                     with gr.Column(scale=2):
@@ -3349,10 +3741,13 @@ def create_fixed_interface():
                 {}  # Clear debug info
             ) + tuple(suggestion_updates) + tuple(topic_updates)
         
-        def send_message_and_update(message, thread_id, history):
-            """Send message and update conversation with enhanced suggestions"""
+        def send_message_and_update(message, thread_id, history, use_streaming=True):
+            """Send message and update conversation with enhanced suggestions (streaming or regular)"""
             try:
-                message_cleared, updated_history, status, enhanced_data = ui.send_conversation_message(message, thread_id, history)
+                if use_streaming:
+                    message_cleared, updated_history, status, enhanced_data = ui.send_conversation_message_stream(message, thread_id, history)
+                else:
+                    message_cleared, updated_history, status, enhanced_data = ui.send_conversation_message(message, thread_id, history)
             except Exception as e:
                 # Fallback when conversation API is not available
                 updated_history = history + [
@@ -3578,7 +3973,7 @@ def create_fixed_interface():
         
         send_button.click(
             fn=send_message_and_update,
-            inputs=[message_input, thread_id_display, chatbot],
+            inputs=[message_input, thread_id_display, chatbot, streaming_toggle],
             outputs=[
                 message_input, chatbot, conversation_status, conversation_status,
                 interaction_hints, conversation_insights, entity_exploration, technical_terms,
@@ -3590,7 +3985,7 @@ def create_fixed_interface():
         
         message_input.submit(
             fn=send_message_and_update,
-            inputs=[message_input, thread_id_display, chatbot],
+            inputs=[message_input, thread_id_display, chatbot, streaming_toggle],
             outputs=[
                 message_input, chatbot, conversation_status, conversation_status,
                 interaction_hints, conversation_insights, entity_exploration, technical_terms,
