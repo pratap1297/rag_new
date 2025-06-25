@@ -9,8 +9,9 @@ import asyncio
 import logging
 from pathlib import Path
 
-# Add src to path
+# Add both src and parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent / "src"))
+sys.path.insert(0, str(Path(__file__).parent.parent))  # Add parent for rag_system.src imports
 
 def check_environment():
     """Check if environment is properly configured"""

@@ -17,12 +17,14 @@ except ImportError:
 
 try:
     from ..core.error_handling import ChunkingError
+    from ..core.resource_manager import get_global_app
 except ImportError:
     # Fallback for when running as script
     import sys
     from pathlib import Path
     sys.path.insert(0, str(Path(__file__).parent.parent))
     from core.error_handling import ChunkingError
+    from core.resource_manager import get_global_app
 
 @dataclass
 class ChunkBoundary:
@@ -324,13 +326,75 @@ class SemanticChunker:
         return self._detect_content_type(text) == 'structured_data'
     
     def _initialize_model(self):
-        """Initialize the sentence transformer model"""
+        """Initialize the sentence transformer model with memory management"""
         try:
-            self.model = SentenceTransformer(self.model_name)
-            logging.info(f"Semantic chunker initialized with model: {self.model_name}")
+            # Try new memory manager first
+            try:
+                from ..core.model_memory_manager import get_model_memory_manager
+                memory_manager = get_model_memory_manager()
+                
+                # Create unique model ID
+                model_id = f"semantic_chunker_{self.model_name.replace('/', '_')}"
+                
+                def load_model():
+                    logging.info(f"Loading sentence transformer: {self.model_name}")
+                    return SentenceTransformer(self.model_name)
+                
+                # Get model through memory manager
+                self.model = memory_manager.get_model(model_id, load_model)
+                logging.info(f"Semantic chunker initialized with memory-managed model: {self.model_name}")
+                return
+                
+            except ImportError:
+                # Fallback to existing resource manager
+                pass
+            
+            # Fallback to existing resource management
+            app = get_global_app()
+            
+            # Load model through managed model loader
+            self.model = app.model_loader.load_model(
+                f"semantic_chunker_{self.model_name}",
+                SentenceTransformer,
+                self.model_name
+            )
+            
+            logging.info(f"Initialized managed semantic chunker model: {self.model_name}")
         except Exception as e:
-            logging.error(f"Failed to initialize semantic chunker: {e}")
+            logging.error(f"Failed to initialize semantic chunker model: {e}")
             self.enabled = False
+            raise ChunkingError(f"Failed to initialize semantic chunker model: {e}")
+    
+    def cleanup(self):
+        """Clean up model resources"""
+        try:
+            if self.model:
+                # Try memory manager cleanup first
+                try:
+                    from ..core.model_memory_manager import get_model_memory_manager
+                    memory_manager = get_model_memory_manager()
+                    model_id = f"semantic_chunker_{self.model_name.replace('/', '_')}"
+                    memory_manager.unload_model(model_id)
+                    self.model = None
+                    logging.info(f"Cleaned up semantic chunker model via memory manager: {self.model_name}")
+                    return
+                except ImportError:
+                    pass
+                
+                # Fallback to existing cleanup
+                app = get_global_app()
+                app.model_loader.unload_model(f"semantic_chunker_{self.model_name}")
+                self.model = None
+                logging.info(f"Cleaned up semantic chunker model: {self.model_name}")
+        except Exception as e:
+            logging.error(f"Error cleaning up semantic chunker: {e}")
+    
+    def __del__(self):
+        """Ensure cleanup on deletion"""
+        try:
+            self.cleanup()
+        except:
+            pass
     
     def chunk_text(self, text: str, metadata: Dict[str, Any] = None) -> List[Dict[str, Any]]:
         """

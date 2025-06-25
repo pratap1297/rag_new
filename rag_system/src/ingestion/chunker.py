@@ -7,7 +7,12 @@ import logging
 from typing import List, Dict, Any
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 
-from ..core.error_handling import ChunkingError
+try:
+    from ..core.error_handling import ChunkingError
+    from ..core.metadata_manager import get_metadata_manager
+except ImportError:
+    from rag_system.src.core.error_handling import ChunkingError
+    from rag_system.src.core.metadata_manager import get_metadata_manager
 
 class Chunker:
     """Text chunking with overlap and metadata preservation"""
@@ -18,6 +23,9 @@ class Chunker:
         self.chunk_overlap = chunk_overlap
         self.use_semantic = use_semantic
         
+        # Initialize metadata manager
+        self.metadata_manager = get_metadata_manager()
+        
         # Initialize LangChain text splitter
         self.text_splitter = RecursiveCharacterTextSplitter(
             chunk_size=chunk_size,
@@ -26,16 +34,17 @@ class Chunker:
             separators=["\n\n", "\n", " ", ""]
         )
         
-        # Initialize semantic chunker if requested
+        # Initialize semantic chunker if requested (lazy loading)
         self.semantic_chunker = None
         if use_semantic:
             try:
                 from .semantic_chunker import SemanticChunker
+                # Initialize semantic chunker (model will be loaded on demand)
                 self.semantic_chunker = SemanticChunker(
                     chunk_size=chunk_size,
                     chunk_overlap=chunk_overlap
                 )
-                logging.info(f"Chunker initialized with semantic chunking: size={chunk_size}, overlap={chunk_overlap}")
+                logging.info(f"Chunker initialized with semantic chunking (model loads on demand): size={chunk_size}, overlap={chunk_overlap}")
             except Exception as e:
                 logging.warning(f"Failed to initialize semantic chunker: {e}, using regular chunking")
                 self.use_semantic = False
@@ -58,17 +67,34 @@ class Chunker:
             # Split into chunks
             chunks = self.text_splitter.split_text(cleaned_text)
             
-            # Create chunk objects with metadata
+            # Create chunk objects with normalized metadata
             chunk_objects = []
             for i, chunk in enumerate(chunks):
-                chunk_obj = {
+                # Create base chunk metadata
+                chunk_metadata = {
                     'text': chunk,
                     'chunk_index': i,
                     'chunk_size': len(chunk),
                     'total_chunks': len(chunks),
-                    'chunking_method': 'recursive',
-                    'metadata': metadata or {}
+                    'chunking_method': 'recursive'
                 }
+                
+                # Merge with provided metadata using metadata manager
+                try:
+                    normalized_metadata = self.metadata_manager.validator.normalize(metadata or {})
+                    chunk_obj = {
+                        'text': chunk,
+                        'chunk_index': i,
+                        'metadata': {**chunk_metadata, **normalized_metadata}
+                    }
+                except Exception as e:
+                    logging.warning(f"Failed to normalize chunk metadata: {e}")
+                    chunk_obj = {
+                        'text': chunk,
+                        'chunk_index': i,
+                        'metadata': chunk_metadata
+                    }
+                
                 chunk_objects.append(chunk_obj)
             
             logging.info(f"Created {len(chunks)} chunks from text")

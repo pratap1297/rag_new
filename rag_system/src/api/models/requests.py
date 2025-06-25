@@ -14,7 +14,7 @@ class QueryRequest(BaseModel):
     class Config:
         schema_extra = {
             "example": {
-                "query": "What is the company policy on remote work?",
+                "query": "What is artificial intelligence?",
                 "filters": {"source_type": "policy"},
                 "top_k": 5
             }

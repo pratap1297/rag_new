@@ -13,35 +13,117 @@ from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 import atexit
 
-from .models.requests import QueryRequest, UploadRequest
-from .models.responses import QueryResponse, UploadResponse, HealthResponse
-from ..core.error_handling import RAGSystemError, QueryError, EmbeddingError, LLMError
-from ..storage.feedback_store import FeedbackStore
+# Import modules with fallback mechanism
+def safe_import(relative_import, absolute_import):
+    """Safely import with fallback from relative to absolute import"""
+    try:
+        return relative_import()
+    except ImportError:
+        try:
+            return absolute_import()
+        except ImportError as e:
+            logging.warning(f"Failed to import module: {e}")
+            return None
+
+# Import required modules
+try:
+    from .models.requests import QueryRequest, UploadRequest
+    from .models.responses import QueryResponse, UploadResponse, HealthResponse
+except ImportError:
+    from rag_system.src.api.models.requests import QueryRequest, UploadRequest
+    from rag_system.src.api.models.responses import QueryResponse, UploadResponse, HealthResponse
+
+try:
+    from ..core.error_handling import RAGSystemError, QueryError, EmbeddingError, LLMError
+    from ..core.unified_error_handling import (
+        ErrorCode, ErrorInfo, ErrorContext, Result, UnifiedError,
+        format_api_response, get_http_status_code, QueryErrorHandler
+    )
+    from ..core.resource_manager import get_global_app, ManagedThreadPool
+    from ..storage.feedback_store import FeedbackStore
+except ImportError:
+    from rag_system.src.core.error_handling import RAGSystemError, QueryError, EmbeddingError, LLMError
+    from rag_system.src.core.unified_error_handling import (
+        ErrorCode, ErrorInfo, ErrorContext, Result, UnifiedError,
+        format_api_response, get_http_status_code, QueryErrorHandler
+    )
+    from rag_system.src.core.resource_manager import get_global_app, ManagedThreadPool
+    from rag_system.src.storage.feedback_store import FeedbackStore
+
+try:
+    from .management_api import create_management_router
+    from .verification_endpoints import router as verification_router
+except ImportError:
+    try:
+        from rag_system.src.api.management_api import create_management_router
+        from rag_system.src.api.verification_endpoints import router as verification_router
+    except ImportError as e:
+        logging.warning(f"Could not import API routers: {e}")
+        create_management_router = None
+        verification_router = None
+
 # Global heartbeat monitor - will be set by main.py
 heartbeat_monitor = None
-from .management_api import create_management_router
 
-# Global thread pool for CPU-intensive tasks
+# Try to import folder monitor at module level
 try:
-    from ..core.constants import DEFAULT_THREAD_POOL_SIZE
-    thread_pool = ThreadPoolExecutor(max_workers=DEFAULT_THREAD_POOL_SIZE)
+    from ..monitoring.folder_monitor import folder_monitor, initialize_folder_monitor
 except ImportError:
-    # Fallback if constants not available
-    thread_pool = ThreadPoolExecutor(max_workers=4)
+    try:
+        from rag_system.src.monitoring.folder_monitor import folder_monitor, initialize_folder_monitor
+    except ImportError:
+        # If folder monitor is not available, create dummy objects
+        folder_monitor = None
+        initialize_folder_monitor = None
+        logging.warning("Folder monitor module not available")
+
+# Managed thread pool for CPU-intensive tasks
+app_lifecycle = None
+thread_pool = None
 
 # Constants
 DEFAULT_TIMEOUT = 30.0
 
-def create_api_app(container, monitoring=None, heartbeat_monitor_instance=None) -> FastAPI:
-    """Create and configure FastAPI application"""
+# Import enhanced folder endpoints
+try:
+    from .simple_enhanced_endpoints import router as enhanced_folder_router
+except ImportError:
+    try:
+        from .enhanced_folder_endpoints import router as enhanced_folder_router
+    except ImportError:
+        enhanced_folder_router = None
+
+def create_api_app(container, monitoring=None, heartbeat_monitor_instance=None, folder_monitor_instance=None, enhanced_folder_monitor_instance=None) -> FastAPI:
+    """Create and configure FastAPI application with resource management"""
+    
+    # Initialize managed resources
+    global heartbeat_monitor, app_lifecycle, thread_pool, folder_monitor
+    
+    # Get managed application instance
+    app_lifecycle = get_global_app()
+    
+    # Create managed thread pool for API operations
+    thread_pool = app_lifecycle.create_custom_thread_pool('api_operations', 8)
     
     # Set the global heartbeat monitor
-    global heartbeat_monitor
     if heartbeat_monitor_instance:
         heartbeat_monitor = heartbeat_monitor_instance
         logging.info(f"✅ Heartbeat monitor set in API: {type(heartbeat_monitor)}")
     else:
         logging.warning("⚠️ No heartbeat monitor instance provided to API")
+    
+    # Set the global folder monitor
+    if folder_monitor_instance:
+        folder_monitor = folder_monitor_instance
+        # Also update the module-level variable
+        try:
+            import rag_system.src.monitoring.folder_monitor as fm_module
+        except ImportError:
+            from ..monitoring import folder_monitor as fm_module
+        fm_module.folder_monitor = folder_monitor_instance
+        logging.info(f"✅ Folder monitor set in API: {type(folder_monitor)}")
+    else:
+        logging.warning("⚠️ No folder monitor instance provided to API")
     
     # Get configuration
     config_manager = container.get('config_manager')
@@ -59,8 +141,9 @@ def create_api_app(container, monitoring=None, heartbeat_monitor_instance=None) 
         redoc_url="/redoc" if config.debug else None
     )
     
-    # Store heartbeat monitor in app state for reliable access
+    # Store monitors in app state for reliable access
     app.state.heartbeat_monitor = heartbeat_monitor
+    app.state.enhanced_folder_monitor = enhanced_folder_monitor_instance
     
     # Add CORS middleware
     cors_origins = getattr(config.api, 'cors_origins', [])
@@ -76,6 +159,24 @@ def create_api_app(container, monitoring=None, heartbeat_monitor_instance=None) 
         allow_headers=["*"],
     )
     
+    # Performance tracking storage
+    query_performance_log = []
+    MAX_PERFORMANCE_LOG_SIZE = 1000
+    
+    def log_query_performance(query_data: dict):
+        """Log query performance data"""
+        nonlocal query_performance_log
+        
+        # Add timestamp
+        query_data['timestamp'] = datetime.now().isoformat()
+        
+        # Add to log
+        query_performance_log.append(query_data)
+        
+        # Keep only recent entries
+        if len(query_performance_log) > MAX_PERFORMANCE_LOG_SIZE:
+            query_performance_log = query_performance_log[-MAX_PERFORMANCE_LOG_SIZE:]
+
     # Dependency to get services
     def get_query_engine():
         return container.get('query_engine')
@@ -126,13 +227,13 @@ def create_api_app(container, monitoring=None, heartbeat_monitor_instance=None) 
                 try:
                     query_embedding = embedder.embed_text(query_text)
                 except Exception as e:
-                    raise EmbeddingError(f"Failed to generate embedding: {str(e)}")
+                    raise Exception(f"Failed to generate embedding: {str(e)}")
                 
-                # Search FAISS index
+                # Search FAISS index with proper metadata formatting
                 try:
-                    search_results = faiss_store.search(query_embedding, k=max_results)
+                    search_results = faiss_store.search_with_metadata(query_embedding, k=max_results)
                 except Exception as e:
-                    raise QueryError(f"Failed to search vectors: {str(e)}")
+                    raise Exception(f"Failed to search vectors: {str(e)}")
                 
                 # Retrieve context and sources
                 context_texts = []
@@ -166,7 +267,7 @@ Answer:"""
                     try:
                         response = llm_client.generate(prompt, max_tokens=500)
                     except Exception as e:
-                        raise LLMError(f"Failed to generate response: {str(e)}")
+                        raise Exception(f"Failed to generate response: {str(e)}")
                 else:
                     response = "I couldn't find relevant information to answer your question."
                 
@@ -182,12 +283,9 @@ Answer:"""
                     "context_used": len(context_texts)
                 }
                 
-            except (EmbeddingError, QueryError, LLMError) as e:
+            except Exception as e:
                 logging.error(f"Query processing error: {e}")
                 raise e
-            except Exception as e:
-                logging.error(f"Unexpected error in query processing: {e}")
-                raise QueryError(f"Unexpected error: {str(e)}")
         
         # Run with timeout and proper error handling
         loop = asyncio.get_event_loop()
@@ -200,33 +298,86 @@ Answer:"""
         except asyncio.TimeoutError:
             logging.error("Query processing timed out")
             raise HTTPException(status_code=408, detail="Query processing timed out")
-        except (EmbeddingError, QueryError, LLMError) as e:
+        except Exception as e:
             logging.error(f"Query processing failed: {e}")
             raise HTTPException(status_code=500, detail=str(e))
-        except Exception as e:
-            logging.error(f"Unexpected error in async processing: {e}")
-            raise HTTPException(status_code=500, detail="Internal server error")
     
-    # Query endpoint with input validation
+    # Query endpoint - simplified to avoid import issues
     @app.post("/query")
     async def query(request: dict):
         """Process a query and return response with sources"""
+        start_time = time.time()
         try:
             query_text = request.get("query", "").strip()
             max_results = min(int(request.get("max_results", 3)), 10)  # Limit max results
             
             if not query_text:
-                raise HTTPException(status_code=400, detail="Query is required")
+                return JSONResponse({
+                    "success": False,
+                    "error": {
+                        "code": "INVALID_REQUEST",
+                        "message": "Query text is required"
+                    }
+                }, status_code=400)
             
-            if len(query_text) > 1000:  # Reasonable limit
-                raise HTTPException(status_code=400, detail="Query too long")
+            # Process query using async function
+            result = await _process_query_async(query_text, max_results)
             
-            return await _process_query_async(query_text, max_results)
-        except ValueError:
-            raise HTTPException(status_code=400, detail="Invalid max_results value")
+            # Log performance data
+            total_time = time.time() - start_time
+            performance_data = {
+                'query': query_text,
+                'response_time': total_time,
+                'sources_count': len(result.get('sources', [])),
+                'success': True
+            }
+            log_query_performance(performance_data)
+            
+            return JSONResponse({
+                "success": True,
+                "data": result
+            }, status_code=200)
+                
+        except ValueError as e:
+            # Log failed query performance
+            total_time = time.time() - start_time
+            performance_data = {
+                'query': request.get('query', ''),
+                'response_time': total_time,
+                'success': False,
+                'error': 'Invalid parameter: ' + str(e)
+            }
+            log_query_performance(performance_data)
+            
+            return JSONResponse({
+                "success": False,
+                "error": {
+                    "code": "INVALID_PARAMETER",
+                    "message": "Invalid max_results value",
+                    "details": {"error": str(e)}
+                }
+            }, status_code=400)
         except Exception as e:
-            logging.error(f"Error in query endpoint: {e}")
-            raise HTTPException(status_code=500, detail="Internal server error")
+            logging.error(f"Unexpected error in query endpoint: {e}")
+            
+            # Log failed query performance
+            total_time = time.time() - start_time
+            performance_data = {
+                'query': request.get('query', ''),
+                'response_time': total_time,
+                'success': False,
+                'error': str(e)
+            }
+            log_query_performance(performance_data)
+            
+            return JSONResponse({
+                "success": False,
+                "error": {
+                    "code": "INTERNAL_ERROR",
+                    "message": "Internal server error",
+                    "details": {"error": str(e)}
+                }
+            }, status_code=500)
     
     async def _process_text_ingestion_async(text: str, metadata: Dict[str, Any]) -> Dict[str, Any]:
         """Process text ingestion asynchronously with timeout"""
@@ -867,27 +1018,31 @@ Answer:"""
     async def get_folder_monitor_status():
         """Get folder monitoring status"""
         try:
-            # Import folder monitor
-            from ..monitoring.folder_monitor import folder_monitor, initialize_folder_monitor
+            # Get the current folder monitor instance
+            current_folder_monitor = None
             
-            # If folder monitor is not initialized, try to initialize it
-            if not folder_monitor:
+            # Try to get from the global variable first
+            from ..monitoring.folder_monitor import folder_monitor as global_folder_monitor
+            current_folder_monitor = global_folder_monitor
+            
+            # If not available, try to initialize on-demand
+            if not current_folder_monitor and initialize_folder_monitor:
                 try:
                     config_manager = container.get('config_manager')
                     if config_manager:
-                        global_folder_monitor = initialize_folder_monitor(container, config_manager)
+                        current_folder_monitor = initialize_folder_monitor(container, config_manager)
                         # Update the global variable
-                        import src.monitoring.folder_monitor as fm_module
-                        fm_module.folder_monitor = global_folder_monitor
+                        try:
+                            import rag_system.src.monitoring.folder_monitor as fm_module
+                        except ImportError:
+                            from ..monitoring import folder_monitor as fm_module
+                        fm_module.folder_monitor = current_folder_monitor
                         logging.info("✅ Folder monitor initialized on-demand")
                 except Exception as init_e:
                     logging.error(f"Failed to initialize folder monitor on-demand: {init_e}")
             
-            # Try again after initialization
-            from ..monitoring.folder_monitor import folder_monitor
-            
-            if folder_monitor:
-                status = folder_monitor.get_status()
+            if current_folder_monitor:
+                status = current_folder_monitor.get_status()
                 return {
                     "success": True,
                     "status": status,
@@ -900,7 +1055,10 @@ Answer:"""
                     "timestamp": time.time()
                 }
         except Exception as e:
-            raise HTTPException(status_code=500, detail=str(e))
+            logging.error(f"Error in folder monitor status endpoint: {e}")
+            import traceback
+            logging.error(f"Full traceback: {traceback.format_exc()}")
+            raise HTTPException(status_code=500, detail=f"Folder monitor status error: {str(e)}")
 
     @app.post("/folder-monitor/add")
     async def add_monitored_folder(request: dict):
@@ -919,7 +1077,10 @@ Answer:"""
                     if config_manager:
                         global_folder_monitor = initialize_folder_monitor(container, config_manager)
                         # Update the global variable
-                        import src.monitoring.folder_monitor as fm_module
+                        try:
+                            import rag_system.src.monitoring.folder_monitor as fm_module
+                        except ImportError:
+                            from ..monitoring import folder_monitor as fm_module
                         fm_module.folder_monitor = global_folder_monitor
                         logging.info("✅ Folder monitor initialized on-demand for add operation")
                 except Exception as init_e:
@@ -1359,37 +1520,655 @@ Answer:"""
             logger.error(f"Failed to export feedback: {e}")
             raise HTTPException(status_code=500, detail="Failed to export feedback")
 
+    # ========================================================================================
+    # VECTOR INDEX MANAGEMENT ENDPOINTS
+    # ========================================================================================
+    
+    @app.get("/vectors")
+    async def get_vectors_paginated(
+        page: int = 1,
+        page_size: int = 20,
+        include_content: bool = False,
+        include_embeddings: bool = False,
+        doc_filter: Optional[str] = None,
+        source_type_filter: Optional[str] = None
+    ):
+        """Get paginated list of vectors with metadata"""
+        # Ensure page and page_size are integers
+        try:
+            page = int(page)
+        except Exception:
+            page = 1
+        try:
+            page_size = int(page_size)
+        except Exception:
+            page_size = 20
+        try:
+            def _get_vectors():
+                faiss_store = container.get('faiss_store')
+                metadata_store = container.get('metadata_store')
+                
+                # Get all vector metadata
+                all_metadata = faiss_store.get_all_metadata()
+                
+                # Apply filters
+                filtered_metadata = []
+                for vector_id, metadata in all_metadata.items():
+                    if doc_filter and doc_filter.lower() not in metadata.get('doc_path', '').lower():
+                        continue
+                    if source_type_filter and metadata.get('source_type') != source_type_filter:
+                        continue
+                    
+                    vector_info = {
+                        'vector_id': vector_id,
+                        'doc_id': metadata.get('doc_id', 'unknown'),
+                        'doc_path': metadata.get('doc_path', 'unknown'),
+                        'source_type': metadata.get('source_type', 'unknown'),
+                        'chunk_index': metadata.get('chunk_index', 0),
+                        'similarity_score': metadata.get('similarity_score', 0.0),
+                        'timestamp': metadata.get('timestamp', ''),
+                        'metadata': {k: v for k, v in metadata.items() if k not in ['content', 'embedding']}
+                    }
+                    
+                    # Include content if requested
+                    if include_content and 'content' in metadata:
+                        vector_info['content'] = metadata['content'][:500] + "..." if len(metadata.get('content', '')) > 500 else metadata.get('content', '')
+                        vector_info['content_length'] = len(metadata.get('content', ''))
+                    
+                    # Include embeddings if requested
+                    if include_embeddings and 'embedding' in metadata:
+                        vector_info['embedding_preview'] = metadata['embedding'][:10] if isinstance(metadata['embedding'], list) else str(metadata['embedding'])[:100]
+                        vector_info['embedding_dimension'] = len(metadata['embedding']) if isinstance(metadata['embedding'], list) else 'unknown'
+                    
+                    filtered_metadata.append(vector_info)
+                
+                # Sort by timestamp (newest first)
+                filtered_metadata.sort(key=lambda x: x.get('timestamp', ''), reverse=True)
+                
+                # Pagination
+                total_vectors = len(filtered_metadata)
+                start_idx = (page - 1) * page_size
+                end_idx = start_idx + page_size
+                paginated_vectors = filtered_metadata[start_idx:end_idx]
+                
+                # Get summary statistics
+                source_types = {}
+                doc_paths = {}
+                for metadata in filtered_metadata:
+                    source_type = metadata.get('source_type', 'unknown')
+                    doc_path = metadata.get('doc_path', 'unknown')
+                    source_types[source_type] = source_types.get(source_type, 0) + 1
+                    doc_paths[doc_path] = doc_paths.get(doc_path, 0) + 1
+                
+                return {
+                    'success': True,
+                    'data': {
+                        'vectors': paginated_vectors,
+                        'pagination': {
+                            'page': page,
+                            'page_size': page_size,
+                            'total_vectors': total_vectors,
+                            'total_pages': (total_vectors + page_size - 1) // page_size,
+                            'has_next': end_idx < total_vectors,
+                            'has_previous': page > 1
+                        },
+                        'filters': {
+                            'doc_filter': doc_filter,
+                            'source_type_filter': source_type_filter,
+                            'include_content': include_content,
+                            'include_embeddings': include_embeddings
+                        },
+                        'summary': {
+                            'total_vectors': total_vectors,
+                            'source_types': source_types,
+                            'unique_documents': len(doc_paths),
+                            'top_documents': dict(sorted(doc_paths.items(), key=lambda x: x[1], reverse=True)[:10])
+                        }
+                    }
+                }
+            
+            # Execute with timeout
+            result = await asyncio.get_event_loop().run_in_executor(
+                thread_pool, _get_vectors
+            )
+            return result
+            
+        except Exception as e:
+            logging.error(f"Error getting vectors: {e}")
+            return {
+                'success': False,
+                'error': str(e),
+                'error_type': type(e).__name__
+            }
+    
+    @app.get("/vectors/{vector_id}")
+    async def get_vector_details(vector_id: str, include_embedding: bool = False):
+        """Get detailed information about a specific vector"""
+        try:
+            def _get_vector_details():
+                faiss_store = container.get('faiss_store')
+                
+                # Get vector metadata
+                metadata = faiss_store.get_metadata(vector_id)
+                if not metadata:
+                    return {
+                        'success': False,
+                        'error': f'Vector {vector_id} not found'
+                    }
+                
+                vector_info = {
+                    'vector_id': vector_id,
+                    'metadata': metadata,
+                    'doc_id': metadata.get('doc_id', 'unknown'),
+                    'doc_path': metadata.get('doc_path', 'unknown'),
+                    'source_type': metadata.get('source_type', 'unknown'),
+                    'chunk_index': metadata.get('chunk_index', 0),
+                    'content': metadata.get('content', ''),
+                    'content_length': len(metadata.get('content', '')),
+                    'timestamp': metadata.get('timestamp', ''),
+                    'similarity_score': metadata.get('similarity_score', 0.0)
+                }
+                
+                # Include embedding if requested
+                if include_embedding and 'embedding' in metadata:
+                    embedding = metadata['embedding']
+                    vector_info['embedding'] = embedding
+                    vector_info['embedding_stats'] = {
+                        'dimension': len(embedding) if isinstance(embedding, list) else 'unknown',
+                        'norm': sum(x*x for x in embedding)**0.5 if isinstance(embedding, list) else 'unknown',
+                        'min_value': min(embedding) if isinstance(embedding, list) else 'unknown',
+                        'max_value': max(embedding) if isinstance(embedding, list) else 'unknown',
+                        'mean_value': sum(embedding)/len(embedding) if isinstance(embedding, list) else 'unknown'
+                    }
+                
+                # Find similar vectors
+                try:
+                    if 'embedding' in metadata:
+                        similar_results = faiss_store.search_with_metadata(metadata['embedding'], k=6)
+                        similar_vectors = []
+                        for result in similar_results[1:]:  # Skip the first one (itself)
+                            similar_vectors.append({
+                                'vector_id': result.get('vector_id', 'unknown'),
+                                'doc_id': result.get('doc_id', 'unknown'),
+                                'similarity': result.get('similarity', 0.0),
+                                'content_preview': result.get('content', '')[:100] + "..." if len(result.get('content', '')) > 100 else result.get('content', '')
+                            })
+                        vector_info['similar_vectors'] = similar_vectors[:5]
+                except Exception as e:
+                    vector_info['similar_vectors'] = []
+                    vector_info['similarity_error'] = str(e)
+                
+                return {
+                    'success': True,
+                    'data': vector_info
+                }
+            
+            # Execute with timeout
+            result = await asyncio.get_event_loop().run_in_executor(
+                thread_pool, _get_vector_details
+            )
+            return result
+            
+        except Exception as e:
+            logging.error(f"Error getting vector details: {e}")
+            return {
+                'success': False,
+                'error': str(e),
+                'error_type': type(e).__name__
+            }
+    
+    @app.get("/vectors/search")
+    async def search_vectors(
+        query: str,
+        k: int = 10,
+        similarity_threshold: float = 0.0,
+        doc_filter: Optional[str] = None,
+        include_embeddings: bool = False
+    ):
+        """Search vectors by query with detailed results"""
+        try:
+            def _search_vectors():
+                query_engine = container.get('query_engine')
+                faiss_store = container.get('faiss_store')
+                embedder = container.get('embedder')
+                
+                # Generate query embedding
+                query_embedding = embedder.embed_text(query)
+                
+                # Search vectors
+                search_results = faiss_store.search_with_metadata(query_embedding, k=k*2)  # Get more for filtering
+                
+                # Filter results
+                filtered_results = []
+                for result in search_results:
+                    if result.get('similarity', 0) < similarity_threshold:
+                        continue
+                    if doc_filter and doc_filter.lower() not in result.get('doc_path', '').lower():
+                        continue
+                    
+                    result_info = {
+                        'vector_id': result.get('vector_id', 'unknown'),
+                        'doc_id': result.get('doc_id', 'unknown'),
+                        'doc_path': result.get('doc_path', 'unknown'),
+                        'similarity': result.get('similarity', 0.0),
+                        'content': result.get('content', ''),
+                        'content_preview': result.get('content', '')[:200] + "..." if len(result.get('content', '')) > 200 else result.get('content', ''),
+                        'chunk_index': result.get('chunk_index', 0),
+                        'source_type': result.get('source_type', 'unknown'),
+                        'timestamp': result.get('timestamp', '')
+                    }
+                    
+                    if include_embeddings and 'embedding' in result:
+                        result_info['embedding_preview'] = result['embedding'][:10] if isinstance(result['embedding'], list) else str(result['embedding'])[:100]
+                    
+                    filtered_results.append(result_info)
+                    
+                    if len(filtered_results) >= k:
+                        break
+                
+                # Calculate search statistics
+                similarities = [r['similarity'] for r in filtered_results]
+                search_stats = {
+                    'total_results': len(filtered_results),
+                    'avg_similarity': sum(similarities) / len(similarities) if similarities else 0,
+                    'max_similarity': max(similarities) if similarities else 0,
+                    'min_similarity': min(similarities) if similarities else 0,
+                    'results_above_threshold': len([s for s in similarities if s > similarity_threshold])
+                }
+                
+                return {
+                    'success': True,
+                    'data': {
+                        'query': query,
+                        'results': filtered_results,
+                        'search_params': {
+                            'k': k,
+                            'similarity_threshold': similarity_threshold,
+                            'doc_filter': doc_filter,
+                            'include_embeddings': include_embeddings
+                        },
+                        'statistics': search_stats
+                    }
+                }
+            
+            # Execute with timeout
+            result = await asyncio.get_event_loop().run_in_executor(
+                thread_pool, _search_vectors
+            )
+            return result
+            
+        except Exception as e:
+            logging.error(f"Error searching vectors: {e}")
+            return {
+                'success': False,
+                'error': str(e),
+                'error_type': type(e).__name__
+            }
+    
+    # ========================================================================================
+    # QUERY PERFORMANCE MONITORING ENDPOINTS
+    # ========================================================================================
+    
+
+    
+    @app.get("/performance/queries")
+    async def get_query_performance(
+        limit: int = 50,
+        include_details: bool = True,
+        time_range_hours: int = 24
+    ):
+        """Get query performance metrics"""
+        try:
+            from datetime import datetime, timedelta
+            
+            # Filter by time range
+            cutoff_time = datetime.now() - timedelta(hours=time_range_hours)
+            filtered_logs = [
+                log for log in query_performance_log
+                if datetime.fromisoformat(log['timestamp']) > cutoff_time
+            ]
+            
+            # Get recent queries
+            recent_queries = filtered_logs[-limit:] if filtered_logs else []
+            
+            # Calculate performance statistics
+            if filtered_logs:
+                response_times = [log.get('response_time', 0) for log in filtered_logs]
+                embedding_times = [log.get('embedding_time', 0) for log in filtered_logs if log.get('embedding_time')]
+                search_times = [log.get('search_time', 0) for log in filtered_logs if log.get('search_time')]
+                llm_times = [log.get('llm_time', 0) for log in filtered_logs if log.get('llm_time')]
+                
+                performance_stats = {
+                    'total_queries': len(filtered_logs),
+                    'avg_response_time': sum(response_times) / len(response_times) if response_times else 0,
+                    'min_response_time': min(response_times) if response_times else 0,
+                    'max_response_time': max(response_times) if response_times else 0,
+                    'avg_embedding_time': sum(embedding_times) / len(embedding_times) if embedding_times else 0,
+                    'avg_search_time': sum(search_times) / len(search_times) if search_times else 0,
+                    'avg_llm_time': sum(llm_times) / len(llm_times) if llm_times else 0,
+                    'success_rate': len([log for log in filtered_logs if log.get('success', False)]) / len(filtered_logs) * 100,
+                    'error_rate': len([log for log in filtered_logs if not log.get('success', True)]) / len(filtered_logs) * 100
+                }
+                
+                # Query complexity analysis
+                query_lengths = [len(log.get('query', '')) for log in filtered_logs]
+                sources_returned = [log.get('sources_count', 0) for log in filtered_logs]
+                
+                complexity_stats = {
+                    'avg_query_length': sum(query_lengths) / len(query_lengths) if query_lengths else 0,
+                    'avg_sources_returned': sum(sources_returned) / len(sources_returned) if sources_returned else 0,
+                    'max_sources_returned': max(sources_returned) if sources_returned else 0
+                }
+                
+                # Error analysis
+                errors = [log.get('error', '') for log in filtered_logs if log.get('error')]
+                error_types = {}
+                for error in errors:
+                    error_type = error.split(':')[0] if ':' in error else error
+                    error_types[error_type] = error_types.get(error_type, 0) + 1
+                
+            else:
+                performance_stats = {
+                    'total_queries': 0,
+                    'avg_response_time': 0,
+                    'min_response_time': 0,
+                    'max_response_time': 0,
+                    'avg_embedding_time': 0,
+                    'avg_search_time': 0,
+                    'avg_llm_time': 0,
+                    'success_rate': 0,
+                    'error_rate': 0
+                }
+                complexity_stats = {
+                    'avg_query_length': 0,
+                    'avg_sources_returned': 0,
+                    'max_sources_returned': 0
+                }
+                error_types = {}
+            
+            response_data = {
+                'performance_stats': performance_stats,
+                'complexity_stats': complexity_stats,
+                'error_analysis': {
+                    'total_errors': len(errors) if 'errors' in locals() else 0,
+                    'error_types': error_types
+                },
+                'time_range_hours': time_range_hours,
+                'data_points': len(filtered_logs)
+            }
+            
+            if include_details:
+                response_data['recent_queries'] = recent_queries
+            
+            return {
+                'success': True,
+                'data': response_data
+            }
+            
+        except Exception as e:
+            logging.error(f"Error getting query performance: {e}")
+            return {
+                'success': False,
+                'error': str(e),
+                'error_type': type(e).__name__
+            }
+    
+    @app.post("/performance/test")
+    async def test_query_performance(request: dict):
+        """Test query performance with detailed timing"""
+        try:
+            query_text = request.get('query', 'test query')
+            max_results = request.get('max_results', 3)
+            
+            # Start timing
+            start_time = time.time()
+            
+            # Detailed timing for each component
+            component_times = {}
+            
+            def _test_performance():
+                nonlocal component_times
+                
+                # Time embedding generation
+                embedding_start = time.time()
+                embedder = container.get('embedder')
+                query_embedding = embedder.embed_text(query_text)
+                component_times['embedding'] = time.time() - embedding_start
+                
+                # Time vector search
+                search_start = time.time()
+                faiss_store = container.get('faiss_store')
+                search_results = faiss_store.search_with_metadata(query_embedding, k=max_results)
+                component_times['search'] = time.time() - search_start
+                
+                # Time LLM generation (if sources found)
+                if search_results:
+                    llm_start = time.time()
+                    try:
+                        llm = container.get('llm')
+                        context = "\n".join([result.get('content', '') for result in search_results[:3]])
+                        prompt = f"Based on the following context, answer the question: {query_text}\n\nContext:\n{context}"
+                        response = llm.generate(prompt)
+                        component_times['llm'] = time.time() - llm_start
+                    except Exception as e:
+                        component_times['llm'] = 0
+                        component_times['llm_error'] = str(e)
+                else:
+                    component_times['llm'] = 0
+                
+                return {
+                    'query': query_text,
+                    'sources_found': len(search_results),
+                    'embedding_dimension': len(query_embedding) if isinstance(query_embedding, list) else 'unknown',
+                    'search_results': search_results[:max_results] if search_results else []
+                }
+            
+            # Execute test
+            result = await asyncio.get_event_loop().run_in_executor(
+                thread_pool, _test_performance
+            )
+            
+            total_time = time.time() - start_time
+            
+            # Log performance data
+            performance_data = {
+                'query': query_text,
+                'response_time': total_time,
+                'embedding_time': component_times.get('embedding', 0),
+                'search_time': component_times.get('search', 0),
+                'llm_time': component_times.get('llm', 0),
+                'sources_count': len(result.get('search_results', [])),
+                'success': True
+            }
+            log_query_performance(performance_data)
+            
+            return {
+                'success': True,
+                'data': {
+                    'query': query_text,
+                    'total_time': total_time,
+                    'component_times': component_times,
+                    'results': result,
+                    'performance_breakdown': {
+                        'embedding_percentage': (component_times.get('embedding', 0) / total_time * 100) if total_time > 0 else 0,
+                        'search_percentage': (component_times.get('search', 0) / total_time * 100) if total_time > 0 else 0,
+                        'llm_percentage': (component_times.get('llm', 0) / total_time * 100) if total_time > 0 else 0
+                    }
+                }
+            }
+            
+        except Exception as e:
+            logging.error(f"Error testing query performance: {e}")
+            
+            # Log failed performance data
+            performance_data = {
+                'query': request.get('query', 'test query'),
+                'response_time': time.time() - start_time if 'start_time' in locals() else 0,
+                'success': False,
+                'error': str(e)
+            }
+            log_query_performance(performance_data)
+            
+            return {
+                'success': False,
+                'error': str(e),
+                'error_type': type(e).__name__
+            }
+    
+    @app.get("/performance/system")
+    async def get_system_performance():
+        """Get overall system performance metrics"""
+        try:
+            def _get_system_performance():
+                import psutil
+                import os
+                
+                # Memory usage
+                memory = psutil.virtual_memory()
+                
+                # CPU usage
+                cpu_percent = psutil.cpu_percent(interval=1)
+                
+                # Disk usage
+                disk = psutil.disk_usage('/')
+                
+                # Process info
+                process = psutil.Process(os.getpid())
+                process_memory = process.memory_info()
+                
+                # Vector store statistics
+                faiss_store = container.get('faiss_store')
+                vector_stats = faiss_store.get_stats() if hasattr(faiss_store, 'get_stats') else {}
+                
+                return {
+                    'system_resources': {
+                        'memory': {
+                            'total': memory.total,
+                            'available': memory.available,
+                            'percent_used': memory.percent,
+                            'used': memory.used
+                        },
+                        'cpu': {
+                            'percent_used': cpu_percent,
+                            'core_count': psutil.cpu_count()
+                        },
+                        'disk': {
+                            'total': disk.total,
+                            'used': disk.used,
+                            'free': disk.free,
+                            'percent_used': (disk.used / disk.total) * 100
+                        }
+                    },
+                    'process_resources': {
+                        'memory': {
+                            'rss': process_memory.rss,
+                            'vms': process_memory.vms
+                        },
+                        'cpu_percent': process.cpu_percent(),
+                        'threads': process.num_threads(),
+                        'open_files': len(process.open_files())
+                    },
+                    'vector_store': vector_stats,
+                    'query_performance': {
+                        'total_logged_queries': len(query_performance_log),
+                        'recent_avg_response_time': sum([log.get('response_time', 0) for log in query_performance_log[-50:]]) / min(50, len(query_performance_log)) if query_performance_log else 0
+                    }
+                }
+            
+            # Execute with timeout
+            result = await asyncio.get_event_loop().run_in_executor(
+                thread_pool, _get_system_performance
+            )
+            
+            return {
+                'success': True,
+                'data': result,
+                'timestamp': datetime.now().isoformat()
+            }
+            
+        except Exception as e:
+            logging.error(f"Error getting system performance: {e}")
+            return {
+                'success': False,
+                'error': str(e),
+                'error_type': type(e).__name__
+            }
+
+    @app.exception_handler(UnifiedError)
+    async def unified_error_handler(request, exc: UnifiedError):
+        """Handle unified system errors"""
+        result = Result.fail(exc.error_info)
+        response_data = format_api_response(result)
+        status_code = get_http_status_code(exc.error_info.code)
+        return JSONResponse(response_data, status_code=status_code)
+
     @app.exception_handler(RAGSystemError)
     async def rag_error_handler(request, exc: RAGSystemError):
-        """Handle RAG system specific errors"""
-        return JSONResponse(
-            status_code=500,
-            content={
-                "error": "RAG System Error",
-                "message": str(exc),
-                "type": exc.__class__.__name__
-            }
+        """Handle legacy RAG system specific errors"""
+        # Convert to unified error
+        error_info = ErrorInfo.from_exception(exc)
+        result = Result.fail(error_info)
+        response_data = format_api_response(result)
+        status_code = get_http_status_code(error_info.code)
+        return JSONResponse(response_data, status_code=status_code)
+
+    @app.exception_handler(HTTPException)
+    async def http_exception_handler(request, exc: HTTPException):
+        """Handle FastAPI HTTP exceptions"""
+        # Convert to unified format
+        error_code = {
+            400: ErrorCode.INVALID_REQUEST,
+            401: ErrorCode.UNAUTHORIZED,
+            403: ErrorCode.FORBIDDEN,
+            404: ErrorCode.NOT_FOUND,
+            408: ErrorCode.TIMEOUT,
+            409: ErrorCode.ALREADY_EXISTS,
+            429: ErrorCode.RATE_LIMITED,
+            500: ErrorCode.INTERNAL_ERROR,
+            502: ErrorCode.DEPENDENCY_ERROR,
+            503: ErrorCode.SERVICE_UNAVAILABLE
+        }.get(exc.status_code, ErrorCode.INTERNAL_ERROR)
+        
+        error_info = ErrorInfo(
+            code=error_code,
+            message=exc.detail,
+            details={'status_code': exc.status_code}
         )
+        
+        result = Result.fail(error_info)
+        response_data = format_api_response(result)
+        return JSONResponse(response_data, status_code=exc.status_code)
 
     @app.exception_handler(Exception)
     async def general_error_handler(request, exc: Exception):
-        """Handle general exceptions"""
-        logging.error(f"Unhandled exception: {exc}")
-        return JSONResponse(
-            status_code=500,
-            content={
-                "error": "Internal Server Error",
-                "message": "An unexpected error occurred"
-            }
-        )
+        """Handle general exceptions with unified error handling"""
+        logging.error(f"Unhandled exception: {exc}", exc_info=True)
+        
+        # Convert to unified error
+        error_info = ErrorInfo.from_exception(exc)
+        result = Result.fail(error_info)
+        response_data = format_api_response(result)
+        status_code = get_http_status_code(error_info.code)
+        
+        return JSONResponse(response_data, status_code=status_code)
 
     # Add management API router
-    management_router = create_management_router(container)
-    app.include_router(management_router)
+    if create_management_router:
+        try:
+            management_router = create_management_router(container)
+            app.include_router(management_router)
+            logging.info("✅ Management API routes registered")
+        except Exception as e:
+            logging.warning(f"⚠️ Management API routes not available: {e}")
+    else:
+        logging.warning("⚠️ Management router not available - skipping")
     
     # Add ServiceNow API router
     try:
-        from .routes.servicenow import router as servicenow_router
+        try:
+            from .routes.servicenow import router as servicenow_router
+        except ImportError:
+            from rag_system.src.api.routes.servicenow import router as servicenow_router
         app.include_router(servicenow_router, prefix="/api")
         logging.info("✅ ServiceNow API routes registered")
     except Exception as e:
@@ -1397,25 +2176,68 @@ Answer:"""
     
     # Add conversation router
     try:
-        from .routes.conversation import router as conversation_router
+        try:
+            from .routes.conversation import router as conversation_router
+        except ImportError:
+            from rag_system.src.api.routes.conversation import router as conversation_router
         app.include_router(conversation_router, prefix="/api")
         logging.info("✅ Conversation API routes registered")
     except Exception as e:
         logging.warning(f"⚠️ Conversation API routes not available: {e}")
+    
+    # Add verification router
+    if verification_router:
+        try:
+            app.include_router(verification_router)
+            logging.info("✅ Verification API routes registered")
+        except Exception as e:
+            logging.warning(f"⚠️ Verification API routes not available: {e}")
+    else:
+        logging.warning("⚠️ Verification router not available - skipping")
+
+    # Add enhanced folder monitoring router
+    if enhanced_folder_router:
+        try:
+            app.include_router(enhanced_folder_router, prefix="/api")
+            logging.info("✅ Enhanced folder monitoring API routes registered")
+        except Exception as e:
+            logging.warning(f"⚠️ Enhanced folder monitoring API routes not available: {e}")
+    else:
+        logging.warning("⚠️ Enhanced folder monitoring router not available - skipping")
 
     # Startup and shutdown events
     @app.on_event("startup")
     async def startup_event():
-        """Initialize resources on startup"""
-        logging.info("🚀 RAG System API starting up...")
+        """Initialize resources on startup with managed resources"""
+        logging.info("🚀 RAG System API starting up with managed resources...")
+        
+        # Register feedback store with resource manager
+        if app_lifecycle:
+            app_lifecycle.resource_manager.register_resource(
+                "feedback_store",
+                feedback_store,
+                lambda fs: fs.close() if hasattr(fs, 'close') else None
+            )
         
     @app.on_event("shutdown")
     async def shutdown_event():
-        """Clean up resources on shutdown"""
-        logging.info("🛑 RAG System API shutting down...")
-        # Shutdown thread pool gracefully
-        thread_pool.shutdown(wait=True)
-        logging.info("✅ Thread pool shutdown complete")
+        """Clean up resources on shutdown with comprehensive cleanup"""
+        logging.info("🛑 RAG System API shutting down - cleaning up managed resources...")
+        
+        # Cleanup will be handled automatically by the resource manager
+        if app_lifecycle:
+            # Get final stats before shutdown
+            stats = app_lifecycle.get_system_stats()
+            logging.info(f"Final system stats: {stats}")
+            
+            # The global app lifecycle will handle cleanup automatically
+            # Individual components don't need manual shutdown
+            logging.info("✅ Managed resource cleanup initiated")
+        else:
+            # Fallback cleanup if resource manager not available
+            if thread_pool and hasattr(thread_pool, 'shutdown'):
+                thread_pool.shutdown(wait=True)
+                logging.info("✅ Thread pool shutdown complete")
 
     logging.info("FastAPI application created")
     return app

@@ -31,6 +31,176 @@ class FixedRAGUI:
         # Automatically sync registry with vector store on startup
         self._auto_sync_registry()
         
+        # Initialize monitoring configuration
+        self._initialize_monitoring_config()
+    
+    def _initialize_monitoring_config(self):
+        """Initialize monitoring configuration from saved settings"""
+        try:
+            # Check if monitoring initialization is disabled via environment variable
+            if os.getenv('DISABLE_MONITORING_INIT', '').lower() in ['true', '1', 'yes']:
+                print("DEBUG: Monitoring initialization disabled via DISABLE_MONITORING_INIT environment variable")
+                return
+            
+            # Disable automatic initialization by default since UI provides full control
+            # Users can manage folder monitoring through the UI interface
+            print("DEBUG: Skipping automatic folder monitoring initialization")
+            print("DEBUG: Use the 'Folder Monitor' tab in the UI to manage folder monitoring")
+            print("DEBUG: Set ENABLE_MONITORING_INIT=true environment variable to enable automatic initialization")
+            
+            if not os.getenv('ENABLE_MONITORING_INIT', '').lower() in ['true', '1', 'yes']:
+                return
+            # Check if backend is available before attempting to configure monitoring
+            backend_available = False
+            try:
+                health_response = requests.get(f"{self.api_url}/health", timeout=3)
+                backend_available = health_response.status_code == 200
+            except Exception:
+                print("DEBUG: Backend not available, skipping monitoring initialization")
+                return
+            
+            if not backend_available:
+                print("DEBUG: Backend not responding, skipping monitoring initialization")
+                return
+                
+            # Check if folder monitoring endpoints are available
+            try:
+                # Test if the folder monitoring endpoint exists
+                test_response = requests.get(f"{self.api_url}/folder-monitor/status", timeout=3)
+                if test_response.status_code == 404:
+                    print("DEBUG: Folder monitoring endpoints not available in backend, skipping initialization")
+                    # Try to check what endpoints are available
+                    try:
+                        docs_response = requests.get(f"{self.api_url}/docs", timeout=3)
+                        if docs_response.status_code == 200:
+                            print("DEBUG: Backend API docs are available at /docs - check for folder monitoring endpoints")
+                    except:
+                        pass
+                    return
+                elif test_response.status_code >= 500:
+                    print(f"DEBUG: Folder monitoring service error (HTTP {test_response.status_code}), skipping initialization")
+                    return
+                elif test_response.status_code == 200:
+                    print("DEBUG: Folder monitoring endpoints are available")
+                    # Check current status
+                    try:
+                        status_data = test_response.json()
+                        current_status = status_data.get('status', 'unknown')
+                        print(f"DEBUG: Current folder monitoring status: {current_status}")
+                    except:
+                        print("DEBUG: Could not parse folder monitoring status response")
+                else:
+                    print(f"DEBUG: Folder monitoring status endpoint returned HTTP {test_response.status_code}")
+            except Exception as e:
+                print(f"DEBUG: Could not check folder monitoring availability: {e}")
+                # Continue anyway - the endpoint might exist but not respond to status
+                
+            # Load configuration from file
+            config_path = "data/config/system_config.json"
+            if os.path.exists(config_path):
+                with open(config_path, 'r') as f:
+                    config = json.load(f)
+                
+                configured_folders = config.get('folder_monitoring', {}).get('monitored_folders', [])
+                print(f"DEBUG: Found {len(configured_folders)} folders in configuration")
+                
+                # Track successfully added folders
+                successfully_added_folders = []
+                
+                # Try to add configured folders to monitoring if they exist
+                for folder in configured_folders:
+                    if os.path.exists(folder):
+                        try:
+                            # Try the primary endpoint first
+                            response = requests.post(
+                                f"{self.api_url}/folder-monitor/add",
+                                json={"folder_path": folder},
+                                timeout=5
+                            )
+                            
+                            # If that fails, try alternative endpoint patterns
+                            if response.status_code == 404:
+                                print(f"DEBUG: Trying alternative endpoint for {folder}")
+                                response = requests.post(
+                                    f"{self.api_url}/monitoring/folders/add",
+                                    json={"folder_path": folder},
+                                    timeout=5
+                                )
+                            if response.status_code == 200:
+                                print(f"DEBUG: Successfully added {folder} to monitoring")
+                                successfully_added_folders.append(folder)
+                            else:
+                                error_details = ""
+                                try:
+                                    error_data = response.json()
+                                    error_details = f" - {error_data.get('detail', error_data.get('message', 'No details'))}"
+                                except:
+                                    response_text = response.text[:500] if response.text else 'No response text'
+                                    error_details = f" - {response_text}"
+                                
+                                print(f"DEBUG: Could not add {folder} to monitoring: HTTP {response.status_code}{error_details}")
+                                print(f"DEBUG: Request was: POST {self.api_url}/folder-monitor/add with {{'folder_path': '{folder}'}}")
+                                
+                                # If this is the first folder and we get 400, the API might not support folder monitoring
+                                if response.status_code == 400 and folder == configured_folders[0]:
+                                    print("DEBUG: First folder failed with HTTP 400 - folder monitoring API may not be implemented")
+                                    print("DEBUG: Skipping remaining folder monitoring initialization")
+                                    return
+                        except Exception as e:
+                            print(f"DEBUG: Exception adding {folder} to monitoring: {e}")
+                    else:
+                        print(f"DEBUG: Configured folder does not exist: {folder}")
+                
+                # Only try to start monitoring if we successfully added at least one folder
+                if successfully_added_folders:
+                    print(f"DEBUG: Attempting to start monitoring for {len(successfully_added_folders)} successfully added folders")
+                    try:
+                        response = requests.post(f"{self.api_url}/folder-monitor/start", timeout=5)
+                        if response.status_code == 200:
+                            print(f"DEBUG: Folder monitoring started successfully for folders: {successfully_added_folders}")
+                        else:
+                            error_details = ""
+                            try:
+                                error_data = response.json()
+                                error_details = f" - {error_data.get('detail', error_data.get('message', 'No details'))}"
+                            except:
+                                response_text = response.text[:500] if response.text else 'No response text'
+                                error_details = f" - {response_text}"
+                            print(f"DEBUG: Could not start folder monitoring: HTTP {response.status_code}{error_details}")
+                            print(f"DEBUG: Request was: POST {self.api_url}/folder-monitor/start")
+                            print(f"DEBUG: Successfully added folders were: {successfully_added_folders}")
+                    except Exception as e:
+                        print(f"DEBUG: Exception starting folder monitoring: {e}")
+                        print(f"DEBUG: Successfully added folders were: {successfully_added_folders}")
+                elif configured_folders:
+                    print(f"DEBUG: No folders were successfully added to monitoring (out of {len(configured_folders)} configured)")
+                    print("DEBUG: Cannot start monitoring without successfully added folders")
+                else:
+                    print("DEBUG: No folders configured for monitoring")
+            else:
+                print("DEBUG: Configuration file not found")
+                
+        except Exception as e:
+            print(f"DEBUG: Failed to initialize monitoring config: {e}")
+        
+    def _safe_response_text(self, response, max_length: int = 200) -> str:
+        """Safely extract text from response with length limit"""
+        try:
+            if hasattr(response, 'text') and response.text is not None:
+                text = str(response.text)
+                return text[:max_length] if len(text) > max_length else text
+            elif hasattr(response, 'content') and response.content is not None:
+                content = response.content
+                if isinstance(content, bytes):
+                    text = content.decode('utf-8', errors='replace')
+                else:
+                    text = str(content)
+                return text[:max_length] if len(text) > max_length else text
+            else:
+                return "No response content available"
+        except Exception as e:
+            return f"Error reading response: {str(e)}"
+
     def _auto_sync_registry(self):
         """Automatically sync registry with vector store on startup"""
         try:
@@ -99,58 +269,11 @@ class FixedRAGUI:
                             'chunk_docs': [doc_id]
                         }
             
-            # Also discover documents via search to catch "unknown" docs
-            print("DEBUG: Discovering additional documents via search...")
-            search_queries = [
-                "Building", "network", "facility", "manager", "roster", "excel", 
-                "pdf", "document", "layout", "floor", "equipment"
-            ]
-            
+            # Skip automatic search discovery during startup for faster initialization
+            # Search discovery can be triggered manually via the UI button
+            print("DEBUG: Skipping automatic search discovery during startup for faster initialization")
+            print("DEBUG: Use 'Discover Documents via Search' button in Vector Diagnostics tab if needed")
             discovered_files = set()
-            
-            for query in search_queries:
-                try:
-                    search_response = requests.post(
-                        f"{self.api_url}/query",
-                        json={"query": query, "max_results": 20, "include_metadata": True},
-                        timeout=10
-                    )
-                    
-                    if search_response.status_code == 200:
-                        search_data = search_response.json()
-                        sources = search_data.get('sources', [])
-                        
-                        for source in sources:
-                            metadata = source.get('metadata', {})
-                            filename = metadata.get('filename', metadata.get('original_filename', ''))
-                            
-                            if filename and filename not in discovered_files:
-                                discovered_files.add(filename)
-                                
-                                # Create registry entry for discovered file
-                                registry_path = f"/docs/{os.path.splitext(filename)[0]}"
-                                
-                                if registry_path not in documents_by_path:
-                                    documents_by_path[registry_path] = {
-                                        'status': 'active',
-                                        'upload_count': 1,
-                                        'last_updated': datetime.now().isoformat(),
-                                        'filename': filename,
-                                        'original_filename': filename,
-                                        'chunks': 1,  # We'll update this if we find more
-                                        'source': 'search_discovery',
-                                        'doc_id': source.get('doc_id', 'unknown'),
-                                        'chunk_docs': [source.get('doc_id', 'unknown')]
-                                    }
-                                else:
-                                    # Update chunk count
-                                    documents_by_path[registry_path]['chunks'] += 1
-                                    
-                except Exception as search_error:
-                    print(f"DEBUG: Search discovery error for '{query}': {str(search_error)}")
-                    continue
-            
-            print(f"DEBUG: Discovered {len(discovered_files)} additional files via search")
             
             # Add documents to registry
             self.document_registry.clear()
@@ -170,7 +293,7 @@ class FixedRAGUI:
     def check_api_connection(self) -> str:
         """Check if the API is accessible"""
         try:
-            response = requests.get(f"{self.api_url}/health", timeout=5)
+            response = requests.get(f"{self.api_url}/health", timeout=3)
             if response.status_code == 200:
                 data = response.json()
                 status = data.get('status', 'unknown')
@@ -184,9 +307,13 @@ class FixedRAGUI:
                 
                 return status_text
             else:
-                return f"❌ **API Error: HTTP {response.status_code}**"
+                return f"❌ **API Error: HTTP {response.status_code}**\n🌐 Backend URL: {self.api_url}"
+        except requests.exceptions.Timeout:
+            return f"⏰ **Connection Timeout**\n🌐 Backend URL: {self.api_url}\n💡 Make sure the backend server is running"
+        except requests.exceptions.ConnectionError:
+            return f"🔌 **Connection Refused**\n🌐 Backend URL: {self.api_url}\n💡 Backend server may not be started"
         except Exception as e:
-            return f"❌ **Connection Error:** {str(e)}"
+            return f"❌ **Connection Error:** {str(e)}\n🌐 Backend URL: {self.api_url}"
 
     def upload_and_refresh(self, file, doc_path) -> Tuple[str, str, List[str]]:
         """Upload file and refresh dropdowns"""
@@ -288,7 +415,7 @@ class FixedRAGUI:
                     error_detail = response.json().get('detail', 'Unknown error')
                     error_msg += f"Details: {error_detail}"
                 except:
-                    error_msg += f"Response: {response.text[:200]}"
+                    error_msg += f"Response: {self._safe_response_text(response)}"
                 
                 registry_display = self._format_document_registry()
                 return error_msg, registry_display, []
@@ -420,8 +547,28 @@ class FixedRAGUI:
 
     def _format_document_registry(self) -> str:
         """Format the document registry for display"""
+        # Add debug protection to prevent infinite loops
+        import time
+        current_time = time.time()
+        if hasattr(self, '_last_registry_call'):
+            time_diff = current_time - self._last_registry_call
+            if time_diff < 0.5:  # Prevent calls more frequent than 0.5 seconds
+                print(f"DEBUG: Registry call throttled (last call {time_diff:.2f}s ago)")
+                return f"📋 **Document Registry** ({len(self.document_registry)} documents) - Cached"
+        self._last_registry_call = current_time
+        
         if not self.document_registry:
             return "📋 **No documents in registry**"
+        
+        # Limit debug output to prevent console spam
+        if len(self.document_registry) > 0:
+            print(f"DEBUG: Registry has {len(self.document_registry)} total documents, {len([p for p, i in self.document_registry.items() if i.get('status') == 'active'])} active")
+            # Only show first few documents in debug to prevent spam
+            for i, (doc_path, info) in enumerate(list(self.document_registry.items())[:3]):
+                filename = info.get('filename', 'Unknown')
+                print(f"DEBUG:   {i+1}. {filename} ({doc_path})")
+            if len(self.document_registry) > 3:
+                print(f"DEBUG:   ... and {len(self.document_registry) - 3} more documents")
         
         registry_text = f"📋 **Document Registry** ({len(self.document_registry)} documents)\n\n"
         
@@ -497,7 +644,11 @@ class FixedRAGUI:
 
     def test_query(self, query: str, max_results: int = 5) -> Tuple[str, str, str]:
         """Test a query against the system"""
-        if not query.strip():
+        print(f"DEBUG: test_query called with query='{query}', max_results={max_results}")
+        print(f"DEBUG: query type: {type(query)}, query length: {len(str(query))}")
+        
+        if not query or not str(query).strip():
+            print(f"DEBUG: Query is empty or whitespace-only")
             return "❌ Please enter a query to test", "", ""
         
         try:
@@ -519,12 +670,24 @@ class FixedRAGUI:
                 print(f"DEBUG: Query response - Response length: {len(response_data.get('response', ''))}")
                 print(f"DEBUG: Query response - Sources count: {len(response_data.get('sources', []))}")
             else:
-                print(f"DEBUG: Query response - Error: {response.text[:200]}")
+                print(f"DEBUG: Query response - Error: {self._safe_response_text(response)}")
             
             if response.status_code == 200:
-                data = response.json()
-                raw_answer = data.get('response', '')  # Fixed: API returns 'response', not 'answer'
-                sources = data.get('sources', [])
+                response_json = response.json()
+                print(f"DEBUG: Full response structure: {response_json}")
+                
+                # Handle the correct API response structure: {"success": true, "data": {"response": "...", "sources": [...]}}
+                if response_json.get('success') and 'data' in response_json:
+                    data = response_json['data']
+                    raw_answer = data.get('response', '')
+                    sources = data.get('sources', [])
+                    print(f"DEBUG: Extracted response length: {len(raw_answer)}")
+                    print(f"DEBUG: Extracted sources count: {len(sources)}")
+                else:
+                    print(f"DEBUG: Unexpected response structure or success=false")
+                    raw_answer = ''
+                    sources = []
+                    data = {}
                 
                 # Store response data for feedback
                 response_id = data.get('response_id', '')
@@ -706,13 +869,13 @@ class FixedRAGUI:
                     error_detail = response.json().get('detail', 'Unknown error')
                     error_msg += f"\nDetails: {error_detail}"
                 except:
-                    error_msg += f"\nResponse: {response.text[:200]}"
+                    error_msg += f"\nResponse: {self._safe_response_text(response)}"
                 
                 return error_msg, "", ""
                 
         except Exception as e:
             return f"❌ **Query Error:** {str(e)}", "", ""
-    
+
     def submit_feedback(self, helpful: bool, feedback_text: str = "") -> str:
         """Submit feedback for the last query response"""
         if not hasattr(self, 'last_response_data') or not self.last_response_data:
@@ -818,15 +981,45 @@ class FixedRAGUI:
                     error_detail = response.json().get('detail', 'Unknown error')
                     error_msg += f"Details: {error_detail}"
                 except:
-                    error_msg += f"Response: {response.text[:200]}"
+                    error_msg += f"Response: {self._safe_response_text(response)}"
                 
                 return error_msg
                 
         except Exception as e:
             return f"❌ **Clear Error:** {str(e)}"
 
+    def update_monitoring_config(self, folder_paths: list = None) -> str:
+        """Update the monitoring configuration to ensure persistence"""
+        try:
+            config_path = "data/config/system_config.json"
+            if os.path.exists(config_path):
+                with open(config_path, 'r') as f:
+                    config = json.load(f)
+                
+                if folder_paths is not None:
+                    # Use the provided folder paths directly
+                    config['folder_monitoring']['monitored_folders'] = folder_paths
+                else:
+                    # If no paths provided, keep existing ones
+                    current_folders = config['folder_monitoring'].get('monitored_folders', [])
+                    config['folder_monitoring']['monitored_folders'] = current_folders
+                
+                with open(config_path, 'w') as f:
+                    json.dump(config, f, indent=2)
+                
+                final_folders = config['folder_monitoring']['monitored_folders']
+                return f"✅ Configuration updated with {len(final_folders)} monitored folders"
+            else:
+                return "❌ Configuration file not found"
+        except Exception as e:
+            return f"❌ Failed to update configuration: {str(e)}"
+
     def start_folder_monitoring(self, folder_path: str) -> str:
-        """Start monitoring a folder for file changes using backend API"""
+        """Legacy method - calls add_folder_to_monitoring for backward compatibility"""
+        return self.add_folder_to_monitoring(folder_path)
+
+    def add_folder_to_monitoring(self, folder_path: str) -> str:
+        """Add a folder to monitoring (renamed from start_folder_monitoring for clarity)"""
         if not folder_path or not folder_path.strip():
             return "❌ Please provide a valid folder path"
         
@@ -859,25 +1052,11 @@ class FixedRAGUI:
                             break
                     
                     if already_monitored:
-                        # Folder is already being monitored, just ensure monitoring is started
-                        start_response = requests.post(f"{self.api_url}/folder-monitor/start", timeout=10)
-                        
                         result = f"ℹ️ **Folder Already Being Monitored**\n\n"
                         result += f"📁 **Folder Path:** `{folder_path}`\n"
                         result += f"📅 **Status Check:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
-                        
-                        if start_response.status_code == 200:
-                            start_data = start_response.json()
-                            if start_data.get('success'):
-                                result += f"🟢 **Monitoring Status:** Active\n"
-                                result += f"📁 **Total Folders Monitored:** {len(monitored_folders)}\n"
-                            else:
-                                result += f"⚠️ **Monitoring Status:** {start_data.get('error', 'Unknown status')}\n"
-                        else:
-                            result += f"⚠️ **Monitoring Status:** Could not verify (HTTP {start_response.status_code})\n"
-                        
+                        result += f"📁 **Total Folders Monitored:** {len(monitored_folders)}\n"
                         result += f"\n💡 **Note:** This folder is already in the monitoring list. Backend will continue to monitor it automatically."
-                        
                         return result
             
             # Folder is not being monitored, proceed to add it
@@ -890,21 +1069,10 @@ class FixedRAGUI:
             if response.status_code == 200:
                 data = response.json()
                 if data.get('success'):
-                    # Start monitoring if not already running
-                    start_response = requests.post(f"{self.api_url}/folder-monitor/start", timeout=10)
-                    
                     result = f"✅ **Folder Added to Backend Monitoring!**\n\n"
                     result += f"📁 **Folder Path:** `{folder_path}`\n"
                     result += f"📄 **Files Found:** {data.get('files_found', 0)}\n"
                     result += f"📅 **Added At:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
-                    
-                    if start_response.status_code == 200:
-                        start_data = start_response.json()
-                        if start_data.get('success'):
-                            result += f"🟢 **Monitoring Status:** Started\n"
-                            result += f"📁 **Total Folders Monitored:** {len(start_data.get('folders', []))}\n"
-                        else:
-                            result += f"⚠️ **Monitoring Status:** {start_data.get('error', 'Already running')}\n"
                     
                     # Check for immediate scan results
                     if data.get('immediate_scan'):
@@ -912,7 +1080,17 @@ class FixedRAGUI:
                         result += f"- Changes Detected: {data.get('changes_detected', 0)}\n"
                         result += f"- Files Tracked: {data.get('files_tracked', 0)}\n"
                     
-                    result += f"\n💡 **Note:** Backend will automatically detect new files and changes."
+                    # Update configuration for persistence
+                    status_response = requests.get(f"{self.api_url}/folder-monitor/status", timeout=10)
+                    if status_response.status_code == 200:
+                        status_data = status_response.json()
+                        if status_data.get('success'):
+                            current_folders = status_data.get('status', {}).get('monitored_folders', [])
+                            config_result = self.update_monitoring_config(current_folders)
+                            result += f"\n🔧 **Config Update:** {config_result}\n"
+                    
+                    result += f"\n💡 **Note:** Backend will automatically detect new files and changes in this folder."
+                    result += f"\n🔧 **Configuration:** Folder monitoring settings have been saved for persistence."
                     
                     return result
                 else:
@@ -933,7 +1111,7 @@ class FixedRAGUI:
                     else:
                         return f"❌ HTTP {response.status_code}: {error_detail}"
                 except:
-                    return f"❌ HTTP {response.status_code}: {response.text[:200]}"
+                    return f"❌ HTTP {response.status_code}: {self._safe_response_text(response)}"
         except Exception as e:
             return f"❌ Error: {str(e)}"
 
@@ -956,7 +1134,7 @@ class FixedRAGUI:
                     error_detail = response.json().get('detail', 'Unknown error')
                     return f"❌ HTTP {response.status_code}: {error_detail}"
                 except:
-                    return f"❌ HTTP {response.status_code}: {response.text[:200]}"
+                    return f"❌ HTTP {response.status_code}: {self._safe_response_text(response)}"
         except Exception as e:
             return f"❌ Error: {str(e)}"
 
@@ -984,7 +1162,14 @@ class FixedRAGUI:
                     
                     last_scan = status_data.get('last_scan_time')
                     if last_scan:
-                        status_text += f"**🕐 Last Scan:** {last_scan}\n"
+                        try:
+                            # Parse and format the timestamp
+                            from datetime import datetime
+                            dt = datetime.fromisoformat(last_scan.replace('Z', '+00:00'))
+                            formatted_time = dt.strftime('%Y-%m-%d %H:%M:%S')
+                            status_text += f"**🕐 Last Scan:** {formatted_time}\n"
+                        except:
+                            status_text += f"**🕐 Last Scan:** {last_scan}\n"
                     else:
                         status_text += f"**🕐 Last Scan:** Never\n"
                     
@@ -999,9 +1184,22 @@ class FixedRAGUI:
                             display_path = os.path.normpath(str(folder))
                             status_text += f"{i}. `{display_path}`\n"
                             
-                            # Add existence check
+                            # Add existence check and file count
                             if os.path.exists(display_path):
-                                status_text += f"   ✅ Folder exists and accessible\n"
+                                try:
+                                    # Count files in folder with expanded file types
+                                    supported_extensions = {
+                                        '.txt', '.md', '.pdf', '.docx', '.doc', '.json', '.csv', 
+                                        '.xlsx', '.xls', '.xlsm', '.xlsb', '.pptx', '.ppt',
+                                        '.jpg', '.jpeg', '.png', '.gif', '.bmp', '.tiff', '.tif', '.webp', '.svg',
+                                        '.vsdx', '.vsd', '.vsdm', '.vstx', '.vst', '.vstm'
+                                    }
+                                    file_count = 0
+                                    for root, dirs, files in os.walk(display_path):
+                                        file_count += len([f for f in files if os.path.splitext(f)[1].lower() in supported_extensions])
+                                    status_text += f"   ✅ Folder exists and accessible ({file_count} supported files)\n"
+                                except:
+                                    status_text += f"   ✅ Folder exists and accessible\n"
                             else:
                                 status_text += f"   ❌ Folder not found or inaccessible\n"
                     else:
@@ -1015,6 +1213,188 @@ class FixedRAGUI:
                 return f"❌ HTTP Error: {response.status_code}"
         except Exception as e:
             return f"❌ Connection Error: {str(e)}"
+
+    def get_detailed_file_status(self) -> str:
+        """Get detailed status of all monitored files"""
+        try:
+            response = requests.get(f"{self.api_url}/folder-monitor/files", timeout=10)
+            if response.status_code == 200:
+                data = response.json()
+                if data.get('success'):
+                    files = data.get('files', {})
+                    
+                    if not files:
+                        return "📭 **No files are currently being tracked**\n\nAdd files to monitored folders to see their status here."
+                    
+                    status_text = f"## 📄 Detailed File Status ({len(files)} files)\n\n"
+                    
+                    # Group files by status
+                    by_status = {
+                        'success': [],
+                        'failed': [],
+                        'pending': [],
+                        'unknown': []
+                    }
+                    
+                    for file_path, file_info in files.items():
+                        status = file_info.get('ingestion_status', 'unknown')
+                        by_status.get(status, by_status['unknown']).append((file_path, file_info))
+                    
+                    # Display by status
+                    for status, status_files in by_status.items():
+                        if not status_files:
+                            continue
+                            
+                        status_emoji = {
+                            'success': '✅',
+                            'failed': '❌',
+                            'pending': '⏳',
+                            'unknown': '❓'
+                        }.get(status, '❓')
+                        
+                        status_text += f"### {status_emoji} {status.title()} ({len(status_files)} files)\n\n"
+                        
+                        for file_path, file_info in status_files:
+                            filename = os.path.basename(file_path)
+                            status_text += f"**📄 {filename}**\n"
+                            status_text += f"   📁 Path: `{file_path}`\n"
+                            
+                            # File details
+                            if 'file_size' in file_info:
+                                size_mb = file_info['file_size'] / (1024 * 1024)
+                                status_text += f"   📊 Size: {size_mb:.2f} MB\n"
+                            
+                            if 'last_modified' in file_info:
+                                try:
+                                    from datetime import datetime
+                                    dt = datetime.fromisoformat(file_info['last_modified'].replace('Z', '+00:00'))
+                                    formatted_time = dt.strftime('%Y-%m-%d %H:%M:%S')
+                                    status_text += f"   🕐 Modified: {formatted_time}\n"
+                                except:
+                                    status_text += f"   🕐 Modified: {file_info['last_modified']}\n"
+                            
+                            if 'detected_at' in file_info:
+                                try:
+                                    from datetime import datetime  
+                                    dt = datetime.fromisoformat(file_info['detected_at'].replace('Z', '+00:00'))
+                                    formatted_time = dt.strftime('%Y-%m-%d %H:%M:%S')
+                                    status_text += f"   🔍 Detected: {formatted_time}\n"
+                                except:
+                                    status_text += f"   🔍 Detected: {file_info['detected_at']}\n"
+                            
+                            if 'ingestion_error' in file_info and file_info['ingestion_error']:
+                                status_text += f"   ⚠️ Error: {file_info['ingestion_error']}\n"
+                            
+                            if 'parent_folder' in file_info:
+                                status_text += f"   📂 Folder: `{file_info['parent_folder']}`\n"
+                            
+                            status_text += "\n"
+                    
+                    return status_text
+                else:
+                    return f"❌ Error: {data.get('error', 'Unknown error')}"
+            else:
+                return f"❌ HTTP Error: {response.status_code}"
+        except Exception as e:
+            return f"❌ Connection Error: {str(e)}"
+
+    def sync_config_with_backend(self) -> str:
+        """Sync configuration file with current backend monitoring state"""
+        try:
+            # Get current monitoring status from backend
+            response = requests.get(f"{self.api_url}/folder-monitor/status", timeout=10)
+            if response.status_code == 200:
+                data = response.json()
+                if data.get('success'):
+                    backend_folders = data.get('status', {}).get('monitored_folders', [])
+                    
+                    # Update configuration with backend state
+                    config_result = self.update_monitoring_config(backend_folders)
+                    
+                    result = f"🔄 **Configuration Synced with Backend**\n\n"
+                    result += f"📁 **Folders in Backend:** {len(backend_folders)}\n"
+                    result += f"🔧 **Config Update:** {config_result}\n"
+                    
+                    if backend_folders:
+                        result += f"\n📋 **Current Monitored Folders:**\n"
+                        for i, folder in enumerate(backend_folders, 1):
+                            result += f"{i}. `{folder}`\n"
+                    
+                    return result
+                else:
+                    return f"❌ Backend Error: {data.get('error', 'Unknown error')}"
+            else:
+                return f"❌ HTTP Error: {response.status_code}"
+        except Exception as e:
+            return f"❌ Sync Error: {str(e)}"
+
+    def get_supported_file_types_info(self) -> str:
+        """Get detailed information about supported file types"""
+        info = "## 📋 Comprehensive File Type Support\n\n"
+        
+        file_categories = {
+            "📄 Text Documents": {
+                "extensions": [".txt", ".md"],
+                "description": "Plain text and Markdown files",
+                "processing": "Direct text extraction"
+            },
+            "📖 PDF Documents": {
+                "extensions": [".pdf"],
+                "description": "Portable Document Format files",
+                "processing": "Text extraction with OCR fallback for scanned PDFs"
+            },
+            "📝 Microsoft Word": {
+                "extensions": [".docx", ".doc"],
+                "description": "Word documents (modern and legacy formats)",
+                "processing": "Text and formatting extraction"
+            },
+            "📊 Microsoft Excel": {
+                "extensions": [".xlsx", ".xls", ".xlsm", ".xlsb"],
+                "description": "Excel spreadsheets and workbooks",
+                "processing": "Cell content and structure extraction"
+            },
+            "🎯 Microsoft PowerPoint": {
+                "extensions": [".pptx", ".ppt"],
+                "description": "PowerPoint presentations",
+                "processing": "Slide content and notes extraction"
+            },
+            "📐 Microsoft Visio": {
+                "extensions": [".vsdx", ".vsd", ".vsdm", ".vstx", ".vst", ".vstm"],
+                "description": "Visio diagrams and templates",
+                "processing": "Shape text and diagram metadata extraction"
+            },
+            "🖼️ Image Files": {
+                "extensions": [".jpg", ".jpeg", ".png", ".gif", ".bmp", ".tiff", ".tif", ".webp", ".svg"],
+                "description": "Various image formats",
+                "processing": "OCR text extraction from images"
+            },
+            "📊 Data Files": {
+                "extensions": [".json", ".csv"],
+                "description": "Structured data files",
+                "processing": "Data parsing and content extraction"
+            }
+        }
+        
+        for category, details in file_categories.items():
+            info += f"### {category}\n"
+            info += f"**Extensions**: {', '.join(details['extensions'])}\n"
+            info += f"**Description**: {details['description']}\n"
+            info += f"**Processing**: {details['processing']}\n\n"
+        
+        info += "### 🔧 Processing Notes\n"
+        info += "- **OCR Support**: Images and scanned documents are processed using optical character recognition\n"
+        info += "- **Structured Content**: Office documents preserve formatting and structure information\n"
+        info += "- **Metadata Extraction**: File properties, creation dates, and author information are captured\n"
+        info += "- **Large File Handling**: Files up to 100MB are supported by default\n"
+        info += "- **Batch Processing**: Multiple files are processed efficiently in parallel\n\n"
+        
+        info += "### ⚠️ Important Considerations\n"
+        info += "- **Image Quality**: Higher resolution images provide better OCR results\n"
+        info += "- **File Corruption**: Damaged files may fail processing and will be marked as failed\n"
+        info += "- **Password Protection**: Encrypted files cannot be processed automatically\n"
+        info += "- **Complex Layouts**: Some complex document layouts may require manual review\n"
+        
+        return info
 
     def get_vector_store_stats(self) -> str:
         """Get detailed statistics about the vector store contents"""
@@ -1045,7 +1425,7 @@ class FixedRAGUI:
                 
                 return result
             else:
-                return f"❌ **Failed to get stats:** HTTP {response.status_code}\n{response.text[:200]}"
+                return f"❌ **Failed to get stats:** HTTP {response.status_code}\n{self._safe_response_text(response)}"
                 
         except Exception as e:
             return f"❌ **Error getting vector store stats:** {str(e)}"
@@ -1108,7 +1488,7 @@ class FixedRAGUI:
                 
                 return result
             else:
-                return f"❌ **Failed to get documents:** HTTP {response.status_code}\n{response.text[:200]}"
+                return f"❌ **Failed to get documents:** HTTP {response.status_code}\n{self._safe_response_text(response)}"
                 
         except Exception as e:
             return f"❌ **Error searching vector store:** {str(e)}"
@@ -1171,6 +1551,75 @@ class FixedRAGUI:
         except Exception as e:
             return f"❌ **Error syncing registry:** {str(e)}"
 
+    def discover_documents_via_search(self) -> str:
+        """Manually trigger document discovery via search when backend is available"""
+        try:
+            # Check if backend is available
+            health_response = requests.get(f"{self.api_url}/health", timeout=3)
+            if health_response.status_code != 200:
+                return "❌ **Backend not available** - Cannot perform search discovery"
+            
+            print("DEBUG: Manual search discovery triggered...")
+            search_queries = [
+                "Building", "network", "facility", "manager", "roster", "excel", 
+                "pdf", "document", "layout", "floor", "equipment"
+            ]
+            
+            discovered_files = set()
+            documents_by_path = {}
+            
+            for query in search_queries:
+                try:
+                    search_response = requests.post(
+                        f"{self.api_url}/query",
+                        json={"query": query, "max_results": 20, "include_metadata": True},
+                        timeout=5
+                    )
+                    
+                    if search_response.status_code == 200:
+                        search_data = search_response.json()
+                        sources = search_data.get('sources', [])
+                        
+                        for source in sources:
+                            metadata = source.get('metadata', {})
+                            filename = metadata.get('filename', metadata.get('original_filename', ''))
+                            
+                            if filename and filename not in discovered_files:
+                                discovered_files.add(filename)
+                                
+                                # Create registry entry for discovered file
+                                registry_path = f"/docs/{os.path.splitext(filename)[0]}"
+                                
+                                if registry_path not in documents_by_path:
+                                    documents_by_path[registry_path] = {
+                                        'status': 'active',
+                                        'upload_count': 1,
+                                        'last_updated': datetime.now().isoformat(),
+                                        'filename': filename,
+                                        'original_filename': filename,
+                                        'chunks': 1,
+                                        'source': 'search_discovery',
+                                        'doc_id': source.get('doc_id', 'unknown'),
+                                        'chunk_docs': [source.get('doc_id', 'unknown')]
+                                    }
+                                else:
+                                    # Update chunk count
+                                    documents_by_path[registry_path]['chunks'] += 1
+                                    
+                except Exception as search_error:
+                    print(f"DEBUG: Search discovery error for '{query}': {str(search_error)}")
+                    continue
+            
+            # Add discovered documents to registry
+            for doc_path, doc_info in documents_by_path.items():
+                if doc_path not in self.document_registry:
+                    self.document_registry[doc_path] = doc_info
+            
+            return f"✅ **Search Discovery Complete**\n🔍 Discovered {len(discovered_files)} files\n📄 Added {len(documents_by_path)} documents to registry"
+            
+        except Exception as e:
+            return f"❌ **Discovery Error:** {str(e)}"
+
     def get_heartbeat_status(self) -> str:
         """Get heartbeat monitoring status"""
         try:
@@ -1216,7 +1665,7 @@ class FixedRAGUI:
                 result_data = response.json()
                 return f"✅ **Heartbeat Started**\n📅 {result_data.get('message', 'Monitoring started')}"
             else:
-                return f"❌ **Failed to start heartbeat:** HTTP {response.status_code}\n{response.text[:200]}"
+                return f"❌ **Failed to start heartbeat:** HTTP {response.status_code}\n{self._safe_response_text(response)}"
                 
         except Exception as e:
             return f"❌ **Error starting heartbeat:** {str(e)}"
@@ -1230,7 +1679,7 @@ class FixedRAGUI:
                 result_data = response.json()
                 return f"🛑 **Heartbeat Stopped**\n📅 {result_data.get('message', 'Monitoring stopped')}"
             else:
-                return f"❌ **Failed to stop heartbeat:** HTTP {response.status_code}\n{response.text[:200]}"
+                return f"❌ **Failed to stop heartbeat:** HTTP {response.status_code}\n{self._safe_response_text(response)}"
                 
         except Exception as e:
             return f"❌ **Error stopping heartbeat:** {str(e)}"
@@ -1402,11 +1851,28 @@ class FixedRAGUI:
                                 doc_name = f"Unknown Document {i}"
                             
                             if doc_path not in documents:
+                                # Determine source - check both 'source' and 'source_type' fields
+                                source = 'unknown'
+                                if isinstance(metadata, dict):
+                                    # Priority 1: 'source' field (from UI)
+                                    if metadata.get('source'):
+                                        source = metadata['source']
+                                    # Priority 2: 'source_type' field (from ingestion engine)
+                                    elif metadata.get('source_type'):
+                                        source = metadata['source_type']
+                                    # Priority 3: Check nested metadata
+                                    elif 'metadata' in metadata and isinstance(metadata['metadata'], dict):
+                                        nested = metadata['metadata']
+                                        if nested.get('source'):
+                                            source = nested['source']
+                                        elif nested.get('source_type'):
+                                            source = nested['source_type']
+                                
                                 documents[doc_path] = {
                                     'name': doc_name,
                                     'path': doc_path,
                                     'chunks': 0,
-                                    'source': metadata.get('source', 'unknown') if isinstance(metadata, dict) else 'unknown',
+                                    'source': source,
                                     'last_updated': None,
                                     'file_size': None,
                                     'original_filename': None
@@ -1766,6 +2232,19 @@ class FixedRAGUI:
                 data = response.json()
                 if data.get('success'):
                     files_removed = data.get('files_removed', 0)
+                    
+                    # Get current monitored folders from backend and update config
+                    try:
+                        status_response = requests.get(f"{self.api_url}/folder-monitor/status", timeout=10)
+                        if status_response.status_code == 200:
+                            status_data = status_response.json()
+                            if status_data.get('success'):
+                                current_folders = status_data.get('status', {}).get('monitored_folders', [])
+                                config_result = self.update_monitoring_config(current_folders)
+                                return f"✅ Successfully removed folder from monitoring: {folder_path}\n📄 Files removed from tracking: {files_removed}\n🔧 {config_result}"
+                    except Exception as config_error:
+                        print(f"DEBUG: Failed to update config after folder removal: {config_error}")
+                    
                     return f"✅ Successfully removed folder from monitoring: {folder_path}\n📄 Files removed from tracking: {files_removed}"
                 else:
                     return f"❌ Failed to remove folder: {data.get('error', 'Unknown error')}"
@@ -1786,6 +2265,12 @@ class FixedRAGUI:
                 data = response.json()
                 thread_id = data.get("thread_id", "")
                 initial_response = data.get("response", "Hello! I'm ready to help you with questions about your documents. What would you like to know?")
+                
+                # Add to local conversation history
+                import datetime
+                timestamp = datetime.datetime.now().strftime("%m/%d %H:%M")
+                title = f"New Chat - {timestamp}"
+                self._add_to_conversation_history(thread_id, title)
                 
                 # Return conversation history, thread ID, and status
                 conversation_history = [
@@ -1836,6 +2321,19 @@ The LangGraph conversation system is not currently available. This could be due 
         try:
             # Add user message to history
             history.append({"role": "user", "content": message})
+            
+            # Update conversation title with first user message
+            if len(history) == 2:  # First user message (after welcome message)
+                # Create a meaningful title from the first user message
+                title = message.strip()[:60]
+                if len(message) > 60:
+                    # Try to break at word boundary
+                    last_space = title.rfind(' ')
+                    if last_space > 30:
+                        title = title[:last_space] + "..."
+                    else:
+                        title += "..."
+                self._update_conversation_title(thread_id, title)
             
             # Send to API using thread_id
             response = requests.post(
@@ -1974,6 +2472,181 @@ The LangGraph conversation system is not currently available. This could be due 
         
         return hints[:3]  # Limit to 3 hints
     
+    def get_conversation_history(self) -> List[Tuple[str, str]]:
+        """Get list of conversation threads with their titles"""
+        try:
+            print(f"DEBUG: Fetching conversation history from {self.api_url}/api/conversation/threads")
+            response = requests.get(f"{self.api_url}/api/conversation/threads", timeout=5)
+            
+            print(f"DEBUG: Response status: {response.status_code}")
+            
+            if response.status_code == 200:
+                data = response.json()
+                print(f"DEBUG: Response data: {data}")
+                
+                threads = data.get('threads', [])
+                print(f"DEBUG: Found {len(threads)} threads from API")
+                
+                # If API returns empty threads, try to get from local storage simulation
+                if not threads:
+                    print("DEBUG: API returned empty threads, trying alternative approach...")
+                    return self._get_local_conversation_history()
+                
+                # Format as (thread_id, title) tuples for dropdown
+                formatted_threads = []
+                for thread in threads:
+                    thread_id = thread.get('thread_id', '')
+                    # Create a meaningful title from first message or use timestamp
+                    title = thread.get('title', '')
+                    if not title:
+                        # Use first user message as title (truncated)
+                        messages = thread.get('messages', [])
+                        for msg in messages:
+                            if msg.get('type') == 'user':
+                                content = msg.get('content', '').strip()
+                                if content:
+                                    # Clean up the title - remove extra whitespace and make it more readable
+                                    title = content[:60].strip()
+                                    if len(content) > 60:
+                                        # Try to break at word boundary
+                                        last_space = title.rfind(' ')
+                                        if last_space > 30:
+                                            title = title[:last_space] + "..."
+                                        else:
+                                            title += "..."
+                                    break
+                        
+                        # If still no title, create a descriptive one with timestamp
+                        if not title:
+                            import datetime
+                            timestamp = datetime.datetime.now().strftime("%m/%d %H:%M")
+                            title = f"New Chat - {timestamp}"
+                    
+                    formatted_threads.append((thread_id, title))
+                    print(f"DEBUG: Added thread: {thread_id[:8]} - {title}")
+                
+                print(f"DEBUG: Returning {len(formatted_threads)} formatted threads")
+                return formatted_threads
+            
+            elif response.status_code == 404:
+                print("DEBUG: Conversation threads endpoint not found - trying alternative approach")
+                return self._get_local_conversation_history()
+            else:
+                print(f"DEBUG: Unexpected response status: {response.status_code}")
+                print(f"DEBUG: Response text: {response.text}")
+                return self._get_local_conversation_history()
+                
+        except requests.exceptions.RequestException as e:
+            print(f"DEBUG: Request error getting conversation history: {e}")
+            return self._get_local_conversation_history()
+        except Exception as e:
+            print(f"DEBUG: Unexpected error getting conversation history: {e}")
+            return self._get_local_conversation_history()
+    
+    def _get_local_conversation_history(self) -> List[Tuple[str, str]]:
+        """Fallback method to get conversation history from local tracking"""
+        try:
+            # Store conversation threads in a simple in-memory store for now
+            # In a real implementation, this would query the database directly
+            if not hasattr(self, '_conversation_threads'):
+                self._conversation_threads = []
+            
+            print(f"DEBUG: Local conversation history has {len(self._conversation_threads)} threads")
+            return self._conversation_threads
+            
+        except Exception as e:
+            print(f"DEBUG: Error getting local conversation history: {e}")
+            return []
+    
+    def _add_to_conversation_history(self, thread_id: str, title: str = None):
+        """Add a conversation to local history tracking"""
+        try:
+            if not hasattr(self, '_conversation_threads'):
+                self._conversation_threads = []
+            
+            # Generate title if not provided
+            if not title:
+                import datetime
+                timestamp = datetime.datetime.now().strftime("%m/%d %H:%M")
+                title = f"Chat - {timestamp}"
+            
+            # Check if thread already exists
+            existing_threads = [t[0] for t in self._conversation_threads]
+            if thread_id not in existing_threads:
+                self._conversation_threads.insert(0, (thread_id, title))
+                print(f"DEBUG: Added thread to local history: {thread_id[:8]} - {title}")
+                
+                # Keep only last 20 conversations
+                if len(self._conversation_threads) > 20:
+                    self._conversation_threads = self._conversation_threads[:20]
+            
+        except Exception as e:
+            print(f"DEBUG: Error adding to conversation history: {e}")
+    
+    def _update_conversation_title(self, thread_id: str, new_title: str):
+        """Update the title of an existing conversation"""
+        try:
+            if not hasattr(self, '_conversation_threads'):
+                self._conversation_threads = []
+            
+            # Find and update the thread
+            for i, (tid, old_title) in enumerate(self._conversation_threads):
+                if tid == thread_id:
+                    self._conversation_threads[i] = (thread_id, new_title)
+                    print(f"DEBUG: Updated conversation title: {thread_id[:8]} - {new_title}")
+                    break
+                    
+        except Exception as e:
+            print(f"DEBUG: Error updating conversation title: {e}")
+    
+    def load_conversation_thread(self, thread_id: str) -> Tuple[List[Dict[str, str]], str, str]:
+        """Load a specific conversation thread"""
+        if not thread_id:
+            return [], "", "No thread selected"
+        
+        try:
+            response = requests.get(f"{self.api_url}/api/conversation/thread/{thread_id}")
+            
+            if response.status_code == 200:
+                data = response.json()
+                messages = data.get('messages', [])
+                
+                # Convert to chatbot format
+                history = []
+                for msg in messages:
+                    if msg.get('type') in ['user', 'assistant']:
+                        history.append({
+                            "role": msg['type'],
+                            "content": msg.get('content', '')
+                        })
+                
+                return history, thread_id, f"✅ Loaded conversation {thread_id[:8]}"
+            else:
+                return [], "", f"❌ Failed to load thread: {response.status_code}"
+                
+        except Exception as e:
+            return [], "", f"❌ Error loading thread: {str(e)}"
+    
+    def delete_conversation_thread(self, thread_id: str) -> str:
+        """Delete a conversation thread"""
+        if not thread_id:
+            return "No thread selected"
+        
+        try:
+            response = requests.delete(f"{self.api_url}/api/conversation/thread/{thread_id}")
+            
+            if response.status_code == 200:
+                return f"✅ Thread {thread_id[:8]} deleted successfully"
+            else:
+                return f"❌ Failed to delete thread: {response.status_code}"
+                
+        except Exception as e:
+            return f"❌ Error deleting thread: {str(e)}"
+    
+    def auto_start_new_conversation(self) -> Tuple[List[Dict[str, str]], str, str]:
+        """Automatically start a new conversation when page loads"""
+        return self.start_new_conversation()
+
     def end_conversation(self, thread_id: str) -> Tuple[List[Dict[str, str]], str, str]:
         """End the current conversation using thread_id"""
         if not thread_id or thread_id == "No thread":
@@ -2155,6 +2828,967 @@ The LangGraph conversation system is not currently available. This could be due 
             history.append({"role": "assistant", "content": f"Streaming Error: {str(e)}"})
             return "", history, f"❌ Streaming Error: {str(e)}", {}
 
+    # Pipeline Verification Methods
+    def validate_file_for_verification(self, file_path: str) -> Tuple[str, str]:
+        """Validate a file before processing with verification"""
+        try:
+            response = requests.post(
+                f"{self.api_url}/api/verification/validate-file",
+                json={"file_path": file_path},
+                timeout=30
+            )
+            
+            if response.status_code == 200:
+                result = response.json()
+                if result.get("valid"):
+                    checks_summary = "\n".join([
+                        f"✅ {check['check_name']}: {check['message']}"
+                        for check in result.get("checks", [])
+                        if check.get("status") == "passed"
+                    ])
+                    warnings = "\n".join([
+                        f"⚠️ {check['check_name']}: {check['message']}"
+                        for check in result.get("checks", [])
+                        if check.get("status") == "warning"
+                    ])
+                    
+                    status = f"✅ File validation passed!\n\n{checks_summary}"
+                    if warnings:
+                        status += f"\n\nWarnings:\n{warnings}"
+                    
+                    details = json.dumps(result, indent=2)
+                    return status, details
+                else:
+                    errors = "\n".join([
+                        f"❌ {check['check_name']}: {check['message']}"
+                        for check in result.get("checks", [])
+                        if check.get("status") == "failed"
+                    ])
+                    return f"❌ File validation failed!\n\n{errors}", json.dumps(result, indent=2)
+            else:
+                return f"❌ Validation error: {response.status_code}", f"HTTP Error: {response.text}"
+                
+        except Exception as e:
+            return f"❌ Validation error: {str(e)}", f"Exception: {str(e)}"
+
+    def ingest_with_verification(self, file_path: str, metadata: dict = None) -> Tuple[str, str, str]:
+        """Ingest file with full pipeline verification"""
+        try:
+            payload = {"file_path": file_path}
+            if metadata:
+                payload["metadata"] = metadata
+                
+            response = requests.post(
+                f"{self.api_url}/api/verification/ingest-with-verification",
+                json=payload,
+                timeout=300  # 5 minutes for large files
+            )
+            
+            if response.status_code == 200:
+                result = response.json()
+                
+                # Format status
+                if result.get("success"):
+                    status = f"✅ Ingestion successful!\n"
+                    if "ingestion_result" in result:
+                        ing_result = result["ingestion_result"]
+                        status += f"📄 File ID: {ing_result.get('file_id', 'N/A')}\n"
+                        status += f"📝 Chunks created: {ing_result.get('chunks_created', 0)}\n"
+                        status += f"🔢 Vectors stored: {ing_result.get('vectors_stored', 0)}"
+                else:
+                    status = f"❌ Ingestion failed: {result.get('error', 'Unknown error')}"
+                
+                # Format verification details
+                verification_details = "## Verification Results\n\n"
+                warning_count = 0
+                error_count = 0
+                
+                for stage, checks in result.get("verification_results", {}).items():
+                    verification_details += f"### {stage.replace('_', ' ').title()}\n"
+                    for check in checks:
+                        status = check["status"]
+                        if status == "passed":
+                            emoji = "✅"
+                        elif status == "failed":
+                            emoji = "❌"
+                            error_count += 1
+                        else:
+                            emoji = "⚠️"
+                            warning_count += 1
+                        
+                        verification_details += f"{emoji} **{check['check_name']}**: {check['message']}\n"
+                        
+                        # Add explanation for common warnings
+                        if status == "warning" and "fallback processor" in check['message'].lower():
+                            verification_details += f"   💡 *This is normal for text files (.txt, .md, .py, etc.)*\n"
+                    verification_details += "\n"
+                
+                # Add summary
+                if warning_count > 0 or error_count > 0:
+                    verification_details += "---\n\n### 📊 Summary\n"
+                    if error_count > 0:
+                        verification_details += f"❌ **Errors**: {error_count}\n"
+                    if warning_count > 0:
+                        verification_details += f"⚠️ **Warnings**: {warning_count}\n"
+                    verification_details += "\n💡 *See the Troubleshooting tab for solutions to common warnings*\n"
+                
+                # Raw JSON details - use safe serialization
+                try:
+                    raw_details = json.dumps(result, indent=2, default=str)
+                except Exception as e:
+                    raw_details = f"JSON serialization error: {str(e)}\n\nRaw result: {str(result)}"
+                
+                return status, verification_details, raw_details
+            else:
+                error_msg = f"❌ Ingestion error: {response.status_code}"
+                return error_msg, f"HTTP Error: {self._safe_response_text(response)}", ""
+                
+        except Exception as e:
+            error_msg = f"❌ Ingestion error: {str(e)}"
+            return error_msg, f"Exception: {str(e)}", ""
+
+    def get_verification_dashboard_url(self) -> str:
+        """Get the URL for the verification dashboard"""
+        return f"{self.api_url}/api/verification/dashboard"
+
+    def test_content_extraction(self, file_path: str) -> Tuple[str, str]:
+        """Test content extraction without full ingestion"""
+        try:
+            response = requests.post(
+                f"{self.api_url}/api/verification/test-extraction",
+                json={"file_path": file_path},
+                timeout=60
+            )
+            
+            if response.status_code == 200:
+                result = response.json()
+                
+                if "error" in result:
+                    return f"❌ Extraction error: {result['error']}", json.dumps(result, indent=2)
+                
+                status = f"✅ Content extraction test completed!\n\n"
+                status += f"📄 Processor: {result.get('processor', 'Unknown')}\n"
+                status += f"📊 Status: {result.get('status', 'Unknown')}\n"
+                status += f"📑 Sheets: {result.get('sheets', 0)}\n"
+                status += f"📝 Chunks: {result.get('chunks', 0)}\n"
+                status += f"🖼️ Embedded objects: {result.get('embedded_objects', 0)}\n"
+                
+                if result.get('sample_chunk'):
+                    status += f"\n**Sample chunk:**\n{result['sample_chunk'][:200]}..."
+                
+                return status, json.dumps(result, indent=2, default=str)
+            else:
+                return f"❌ Test error: {response.status_code}", f"HTTP Error: {self._safe_response_text(response)}"
+                
+        except Exception as e:
+            return f"❌ Test error: {str(e)}", f"Exception: {str(e)}"
+
+    def test_chunking_methods(self, text: str, method: str = "semantic") -> Tuple[str, str]:
+        """Test different chunking methods"""
+        try:
+            response = requests.post(
+                f"{self.api_url}/api/verification/test-chunking",
+                json={"text": text, "method": method},
+                timeout=30
+            )
+            
+            if response.status_code == 200:
+                result = response.json()
+                
+                status = f"✅ Chunking test completed!\n\n"
+                status += f"🔧 Method: {result.get('method', 'Unknown')}\n"
+                status += f"📝 Chunks: {result.get('chunk_count', 0)}\n"
+                status += f"📏 Average size: {result.get('avg_size', 0):.0f} chars\n"
+                
+                chunk_sizes = result.get('chunk_sizes', [])
+                if chunk_sizes:
+                    status += f"📊 Size range: {min(chunk_sizes)} - {max(chunk_sizes)} chars\n"
+                
+                return status, json.dumps(result, indent=2, default=str)
+            else:
+                return f"❌ Chunking test error: {response.status_code}", f"HTTP Error: {self._safe_response_text(response)}"
+                
+        except Exception as e:
+            return f"❌ Chunking test error: {str(e)}", f"Exception: {str(e)}"
+
+    def get_verification_sessions(self) -> Tuple[str, str]:
+        """Get all verification sessions"""
+        try:
+            response = requests.get(
+                f"{self.api_url}/api/verification/sessions",
+                timeout=30
+            )
+            
+            if response.status_code == 200:
+                sessions = response.json()
+                
+                if not sessions:
+                    return "📋 No verification sessions found", "[]"
+                
+                # Format sessions display
+                sessions_display = "## 📋 Verification Sessions\n\n"
+                for session in sessions[:10]:  # Show last 10 sessions
+                    session_id = session.get('session_id', 'Unknown')
+                    file_path = session.get('file_path', 'Unknown')
+                    status = session.get('status', 'Unknown')
+                    timestamp = session.get('timestamp', 'Unknown')
+                    
+                    # Status emoji
+                    status_emoji = "✅" if status == "completed" else "❌" if status == "failed" else "⏳"
+                    
+                    sessions_display += f"### {status_emoji} {session_id[:8]}...\n"
+                    sessions_display += f"**File**: `{file_path.split('/')[-1] if '/' in file_path else file_path}`\n"
+                    sessions_display += f"**Status**: {status.title()}\n"
+                    sessions_display += f"**Time**: {timestamp}\n\n"
+                
+                return sessions_display, json.dumps(sessions, indent=2, default=str)
+            else:
+                return f"❌ Error fetching sessions: {response.status_code}", f"HTTP Error: {response.text}"
+                
+        except Exception as e:
+            return f"❌ Sessions error: {str(e)}", f"Exception: {str(e)}"
+
+    def get_pipeline_health_status(self) -> str:
+        """Get overall pipeline health status"""
+        try:
+            response = requests.get(
+                f"{self.api_url}/api/verification/health",
+                timeout=15
+            )
+            
+            if response.status_code == 200:
+                health = response.json()
+                
+                status_display = "## 🏥 Pipeline Health Status\n\n"
+                
+                # Overall status
+                overall_status = health.get('status', 'unknown')
+                status_emoji = "✅" if overall_status == "healthy" else "⚠️" if overall_status == "warning" else "❌"
+                status_display += f"### {status_emoji} Overall Status: {overall_status.title()}\n\n"
+                
+                # Component status
+                components = health.get('components', {})
+                for component, status in components.items():
+                    comp_emoji = "✅" if status == "healthy" else "⚠️" if status == "warning" else "❌"
+                    status_display += f"- {comp_emoji} **{component.replace('_', ' ').title()}**: {status.title()}\n"
+                
+                # Recent activity
+                if 'recent_activity' in health:
+                    activity = health['recent_activity']
+                    status_display += f"\n### 📊 Recent Activity\n"
+                    status_display += f"- **Sessions Today**: {activity.get('sessions_today', 0)}\n"
+                    status_display += f"- **Success Rate**: {activity.get('success_rate', 0):.1f}%\n"
+                    status_display += f"- **Average Duration**: {activity.get('avg_duration', 0):.1f}s\n"
+                
+                return status_display
+            else:
+                return f"❌ Health check failed: {response.status_code}"
+                
+        except Exception as e:
+            return f"❌ Health check error: {str(e)}"
+
+    def get_pipeline_stage_status(self) -> str:
+        """Get visual pipeline stage status"""
+        try:
+            response = requests.get(
+                f"{self.api_url}/api/verification/pipeline-status",
+                timeout=15
+            )
+            
+            if response.status_code == 200:
+                pipeline_status = response.json()
+                
+                # Pipeline stages with emojis
+                stages = [
+                    ("FILE_VALIDATION", "📁", "File Validation"),
+                    ("PROCESSOR_SELECTION", "⚙️", "Processor Selection"),
+                    ("CONTENT_EXTRACTION", "📄", "Content Extraction"),
+                    ("TEXT_CHUNKING", "✂️", "Text Chunking"),
+                    ("EMBEDDING_GENERATION", "🧮", "Embedding Generation"),
+                    ("VECTOR_STORAGE", "💾", "Vector Storage"),
+                    ("METADATA_STORAGE", "🏷️", "Metadata Storage")
+                ]
+                
+                status_display = "## 🔄 Pipeline Stages Status\n\n"
+                
+                for stage_key, emoji, stage_name in stages:
+                    stage_info = pipeline_status.get('stages', {}).get(stage_key, {})
+                    status = stage_info.get('status', 'unknown')
+                    last_run = stage_info.get('last_run', 'Never')
+                    success_rate = stage_info.get('success_rate', 0)
+                    
+                    # Status emoji
+                    if status == 'healthy':
+                        status_emoji = "✅"
+                    elif status == 'warning':
+                        status_emoji = "⚠️"
+                    elif status == 'error':
+                        status_emoji = "❌"
+                    else:
+                        status_emoji = "⚪"
+                    
+                    status_display += f"### {emoji} {stage_name}\n"
+                    status_display += f"{status_emoji} **Status**: {status.title()}\n"
+                    status_display += f"📅 **Last Run**: {last_run}\n"
+                    status_display += f"📊 **Success Rate**: {success_rate:.1f}%\n\n"
+                
+                return status_display
+            else:
+                # Fallback display if endpoint doesn't exist
+                return """## 🔄 Pipeline Stages
+
+### 📁 File Validation
+✅ **Status**: Ready
+📋 Validates file existence, size, permissions, and format
+
+### ⚙️ Processor Selection  
+✅ **Status**: Ready
+🔧 Selects appropriate processor (PDF, Excel, Text, etc.)
+
+### 📄 Content Extraction
+✅ **Status**: Ready
+📝 Extracts text content from documents
+
+### ✂️ Text Chunking
+✅ **Status**: Ready
+📄 Splits content into manageable chunks
+
+### 🧮 Embedding Generation
+✅ **Status**: Ready
+🔢 Generates vector embeddings using Azure AI
+
+### 💾 Vector Storage
+✅ **Status**: Ready
+🗄️ Stores vectors in FAISS index
+
+### 🏷️ Metadata Storage
+✅ **Status**: Ready
+📊 Persists file and chunk metadata
+"""
+                
+        except Exception as e:
+            return f"❌ Pipeline status error: {str(e)}"
+
+    def get_session_details(self, session_id: str) -> Tuple[str, str]:
+        """Get detailed information about a specific verification session"""
+        try:
+            response = requests.get(
+                f"{self.api_url}/api/verification/session/{session_id}",
+                timeout=30
+            )
+            
+            if response.status_code == 200:
+                session = response.json()
+                
+                # Format session details
+                details_display = f"## 📋 Session Details: {session_id[:8]}...\n\n"
+                
+                # Basic info
+                details_display += f"**Session ID**: `{session_id}`\n"
+                details_display += f"**File Path**: `{session.get('file_path', 'Unknown')}`\n"
+                details_display += f"**Status**: {session.get('status', 'Unknown').title()}\n"
+                details_display += f"**Timestamp**: {session.get('timestamp', 'Unknown')}\n\n"
+                
+                # Verification results
+                if 'result' in session and 'verification_results' in session['result']:
+                    details_display += "### 🔍 Verification Results\n\n"
+                    
+                    for stage, checks in session['result']['verification_results'].items():
+                        stage_name = stage.replace('_', ' ').title()
+                        details_display += f"#### {stage_name}\n"
+                        
+                        for check in checks:
+                            status = check.get('status', 'unknown')
+                            emoji = "✅" if status == "passed" else "❌" if status == "failed" else "⚠️"
+                            details_display += f"{emoji} **{check.get('check_name', 'Unknown')}**: {check.get('message', 'No message')}\n"
+                        
+                        details_display += "\n"
+                
+                return details_display, json.dumps(session, indent=2)
+            else:
+                return f"❌ Session not found: {response.status_code}", f"HTTP Error: {self._safe_response_text(response)}"
+                
+        except Exception as e:
+            return f"❌ Session details error: {str(e)}", f"Exception: {str(e)}"
+
+    def explain_pipeline_warnings(self) -> str:
+        """Explain common pipeline warnings and how to resolve them"""
+        return """## ⚠️ Common Pipeline Warnings & Solutions
+
+### 🔧 "Fallback Processor Used"
+**What it means**: The system couldn't find a specialized processor for your file type, so it used a generic text extraction method.
+
+**When this happens**:
+- For `.txt`, `.md`, `.py`, `.js` files (expected behavior)
+- For unsupported file formats
+- When specialized processors fail to initialize
+
+**Solutions**:
+- ✅ **For text files**: This is normal and expected
+- 🔧 **For other files**: Check if the file format is supported
+- 📋 **For corrupted files**: Try re-saving or converting the file
+
+### 📏 "File Size Warning"
+**What it means**: Your file is larger than recommended (>100MB)
+
+**Solutions**:
+- ✂️ **Split large files** into smaller sections
+- 🗜️ **Compress images** in documents
+- 📊 **For Excel files**: Remove unnecessary sheets or data
+
+### 🔍 "Content Extraction Issues"
+**What it means**: Some content couldn't be extracted properly
+
+**Solutions**:
+- 📄 **For PDFs**: Ensure text is selectable (not scanned images)
+- 📊 **For Excel**: Check for merged cells or complex formatting
+- 🔓 **For protected files**: Remove password protection
+
+### 🧮 "Embedding Generation Warnings"
+**What it means**: Some text chunks couldn't be embedded
+
+**Solutions**:
+- 📝 **Check text quality**: Remove special characters or corrupted text
+- 📏 **Chunk size**: Very short or very long chunks may cause issues
+- 🔄 **Retry**: Temporary Azure AI service issues
+
+### 💾 "Vector Storage Warnings"
+**What it means**: Issues storing vectors in the FAISS index
+
+**Solutions**:
+- 💽 **Check disk space**: Ensure sufficient storage
+- 🔄 **Restart system**: Clear any locked index files
+- 🧹 **Clear vector store**: If index is corrupted
+
+### 📊 "Metadata Storage Issues"  
+**What it means**: File metadata couldn't be saved properly
+
+**Solutions**:
+- 🔓 **Check permissions**: Ensure write access to data directory
+- 💽 **Check disk space**: Ensure sufficient storage
+- 🔄 **Restart system**: Clear any locked database files
+"""
+
+    def start_monitoring_service(self) -> str:
+        """Start the monitoring service (without adding folders)"""
+        try:
+            response = requests.post(f"{self.api_url}/folder-monitor/start", timeout=10)
+            
+            if response.status_code == 200:
+                data = response.json()
+                if data.get('success'):
+                    result = f"🟢 **Backend Folder Monitoring Started**\n\n"
+                    result += f"📅 **Started At:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+                    
+                    # Get current status to show what's being monitored
+                    status_response = requests.get(f"{self.api_url}/folder-monitor/status", timeout=10)
+                    if status_response.status_code == 200:
+                        status_data = status_response.json()
+                        if status_data.get('success'):
+                            status_info = status_data.get('status', {})
+                            monitored_folders = status_info.get('monitored_folders', [])
+                            result += f"📁 **Folders Being Monitored:** {len(monitored_folders)}\n"
+                            
+                            if monitored_folders:
+                                result += f"\n**📂 Monitored Folders:**\n"
+                                for folder in monitored_folders[:5]:  # Show first 5
+                                    result += f"- `{folder}`\n"
+                                if len(monitored_folders) > 5:
+                                    result += f"- ... and {len(monitored_folders) - 5} more\n"
+                            else:
+                                result += f"\n⚠️ **Note:** No folders are currently configured for monitoring.\n"
+                                result += f"Use the folder input above to add folders to monitor.\n"
+                    
+                    result += f"\n💡 **Note:** Monitoring service is now active and will check for file changes every 30 seconds."
+                    return result
+                else:
+                    error_msg = data.get('error', 'Unknown error')
+                    if "already running" in error_msg.lower():
+                        return f"ℹ️ **Monitoring Already Running**\n\n🟢 The folder monitoring service is already active.\n\n💡 Use 'Refresh Status' to see current monitoring details."
+                    else:
+                        return f"❌ Failed to start monitoring: {error_msg}"
+            else:
+                try:
+                    error_detail = response.json().get('detail', 'Unknown error')
+                    return f"❌ HTTP {response.status_code}: {error_detail}"
+                except:
+                    return f"❌ HTTP {response.status_code}: {self._safe_response_text(response)}"
+        except Exception as e:
+            return f"❌ Error: {str(e)}"
+
+    # ========================================================================================
+    # VECTOR INDEX MANAGEMENT METHODS
+    # ========================================================================================
+    
+    def get_vectors_paginated(self, page: int = 1, page_size: int = 20, include_content: bool = False, 
+                             doc_filter: str = "", source_type_filter: str = "") -> str:
+        """Get paginated list of vectors with metadata"""
+        # Ensure page and page_size are integers
+        try:
+            page = int(page)
+        except Exception:
+            page = 1
+        try:
+            page_size = int(page_size)
+        except Exception:
+            page_size = 20
+        try:
+            params = {
+                'page': page,
+                'page_size': page_size,
+                'include_content': include_content,
+                'include_embeddings': False
+            }
+            
+            if doc_filter.strip():
+                params['doc_filter'] = doc_filter.strip()
+            if source_type_filter.strip():
+                params['source_type_filter'] = source_type_filter.strip()
+            
+            response = requests.get(f"{self.api_url}/vectors", params=params, timeout=30)
+            
+            if response.status_code == 200:
+                data = response.json()
+                if data.get('success'):
+                    vectors_data = data.get('data', {})
+                    vectors = vectors_data.get('vectors', [])
+                    pagination = vectors_data.get('pagination', {})
+                    summary = vectors_data.get('summary', {})
+                    
+                    result = "📊 **Vector Index Browser**\n\n"
+                    result += f"📄 **Page {pagination.get('page', 1)} of {pagination.get('total_pages', 1)}** "
+                    result += f"({pagination.get('total_vectors', 0)} total vectors)\n\n"
+                    
+                    # Summary statistics
+                    result += "📈 **Summary Statistics:**\n"
+                    result += f"🔢 Total vectors: {summary.get('total_vectors', 0)}\n"
+                    result += f"📁 Unique documents: {summary.get('unique_documents', 0)}\n"
+                    
+                    source_types = summary.get('source_types', {})
+                    if source_types:
+                        result += f"🏷️ Source types: {', '.join([f'{k}({v})' for k, v in source_types.items()])}\n"
+                    
+                    result += "\n📋 **Vectors on this page:**\n\n"
+                    
+                    for i, vector in enumerate(vectors, 1):
+                        result += f"**{i}. Vector ID: {vector.get('vector_id', 'unknown')}**\n"
+                        result += f"   📄 Document: `{vector.get('doc_path', 'unknown')}`\n"
+                        result += f"   🆔 Doc ID: `{vector.get('doc_id', 'unknown')}`\n"
+                        result += f"   🏷️ Source: {vector.get('source_type', 'unknown')}\n"
+                        result += f"   📊 Chunk: {vector.get('chunk_index', 0)}\n"
+                        result += f"   ⏰ Added: {vector.get('timestamp', 'unknown')}\n"
+                        
+                        if include_content and 'content' in vector:
+                            content = vector['content']
+                            preview = content[:200] + "..." if len(content) > 200 else content
+                            result += f"   📝 Content: {preview}\n"
+                            result += f"   📏 Length: {vector.get('content_length', 0)} chars\n"
+                        
+                        result += "\n"
+                    
+                    # Navigation info
+                    if pagination.get('has_previous') or pagination.get('has_next'):
+                        result += "🔄 **Navigation:**\n"
+                        if pagination.get('has_previous'):
+                            result += f"⬅️ Previous page available\n"
+                        if pagination.get('has_next'):
+                            result += f"➡️ Next page available\n"
+                    
+                    return result
+                else:
+                    return f"❌ **Failed to get vectors:** {data.get('error', 'Unknown error')}"
+            else:
+                return f"❌ **HTTP Error {response.status_code}:** {self._safe_response_text(response)}"
+                
+        except Exception as e:
+            return f"❌ **Error getting vectors:** {str(e)}"
+    
+    def get_vector_details(self, vector_id: str, include_embedding: bool = False) -> str:
+        """Get detailed information about a specific vector"""
+        try:
+            if not vector_id.strip():
+                return "❌ **Please provide a vector ID**"
+            
+            params = {'include_embedding': include_embedding}
+            response = requests.get(f"{self.api_url}/vectors/{vector_id.strip()}", params=params, timeout=30)
+            
+            if response.status_code == 200:
+                data = response.json()
+                if data.get('success'):
+                    vector_info = data.get('data', {})
+                    
+                    result = f"🔍 **Vector Details - ID: {vector_id}**\n\n"
+                    
+                    # Basic information
+                    result += "📋 **Basic Information:**\n"
+                    result += f"🆔 Vector ID: `{vector_info.get('vector_id', 'unknown')}`\n"
+                    result += f"📄 Document ID: `{vector_info.get('doc_id', 'unknown')}`\n"
+                    result += f"📁 Document Path: `{vector_info.get('doc_path', 'unknown')}`\n"
+                    result += f"🏷️ Source Type: {vector_info.get('source_type', 'unknown')}\n"
+                    result += f"📊 Chunk Index: {vector_info.get('chunk_index', 0)}\n"
+                    result += f"⏰ Timestamp: {vector_info.get('timestamp', 'unknown')}\n"
+                    result += f"📏 Content Length: {vector_info.get('content_length', 0)} characters\n\n"
+                    
+                    # Content
+                    content = vector_info.get('content', '')
+                    if content:
+                        result += "📝 **Content:**\n"
+                        preview = content[:500] + "..." if len(content) > 500 else content
+                        result += f"```\n{preview}\n```\n\n"
+                    
+                    # Embedding statistics
+                    if 'embedding_stats' in vector_info:
+                        stats = vector_info['embedding_stats']
+                        result += "🧮 **Embedding Statistics:**\n"
+                        result += f"📐 Dimension: {stats.get('dimension', 'unknown')}\n"
+                        result += f"📊 Norm: {stats.get('norm', 'unknown'):.4f}\n"
+                        result += f"📉 Min Value: {stats.get('min_value', 'unknown'):.4f}\n"
+                        result += f"📈 Max Value: {stats.get('max_value', 'unknown'):.4f}\n"
+                        result += f"📊 Mean Value: {stats.get('mean_value', 'unknown'):.4f}\n\n"
+                    
+                    # Similar vectors
+                    similar_vectors = vector_info.get('similar_vectors', [])
+                    if similar_vectors:
+                        result += "🔗 **Similar Vectors:**\n"
+                        for i, similar in enumerate(similar_vectors, 1):
+                            result += f"{i}. **Vector {similar.get('vector_id', 'unknown')}** "
+                            result += f"(similarity: {similar.get('similarity', 0):.3f})\n"
+                            result += f"   📄 Doc: `{similar.get('doc_id', 'unknown')}`\n"
+                            result += f"   📝 Preview: {similar.get('content_preview', 'No preview')}\n\n"
+                    
+                    return result
+                else:
+                    return f"❌ **Failed to get vector details:** {data.get('error', 'Unknown error')}"
+            else:
+                return f"❌ **HTTP Error {response.status_code}:** {self._safe_response_text(response)}"
+                
+        except Exception as e:
+            return f"❌ **Error getting vector details:** {str(e)}"
+    
+    def search_vectors_advanced(self, query: str, k: int = 10, similarity_threshold: float = 0.0, 
+                               doc_filter: str = "") -> str:
+        """Search vectors with advanced filtering and statistics"""
+        try:
+            if not query.strip():
+                return "❌ **Please provide a search query**"
+            
+            params = {
+                'query': query.strip(),
+                'k': k,
+                'similarity_threshold': similarity_threshold,
+                'include_embeddings': False
+            }
+            
+            if doc_filter.strip():
+                params['doc_filter'] = doc_filter.strip()
+            
+            response = requests.get(f"{self.api_url}/vectors/search", params=params, timeout=30)
+            
+            if response.status_code == 200:
+                data = response.json()
+                if data.get('success'):
+                    search_data = data.get('data', {})
+                    results = search_data.get('results', [])
+                    stats = search_data.get('statistics', {})
+                    params_used = search_data.get('search_params', {})
+                    
+                    result = f"🔍 **Advanced Vector Search Results**\n\n"
+                    result += f"🎯 **Query:** '{search_data.get('query', 'unknown')}'\n\n"
+                    
+                    # Search statistics
+                    result += "📊 **Search Statistics:**\n"
+                    result += f"📄 Results found: {stats.get('total_results', 0)}\n"
+                    result += f"📈 Average similarity: {stats.get('avg_similarity', 0):.3f}\n"
+                    result += f"🔝 Max similarity: {stats.get('max_similarity', 0):.3f}\n"
+                    result += f"📉 Min similarity: {stats.get('min_similarity', 0):.3f}\n"
+                    result += f"✅ Above threshold: {stats.get('results_above_threshold', 0)}\n\n"
+                    
+                    # Search parameters
+                    result += "⚙️ **Search Parameters:**\n"
+                    result += f"🔢 Max results (k): {params_used.get('k', 'unknown')}\n"
+                    result += f"📊 Similarity threshold: {params_used.get('similarity_threshold', 0):.3f}\n"
+                    if params_used.get('doc_filter'):
+                        result += f"🔍 Document filter: '{params_used.get('doc_filter')}'\n"
+                    result += "\n"
+                    
+                    # Results
+                    if results:
+                        result += "📋 **Search Results:**\n\n"
+                        for i, res in enumerate(results, 1):
+                            result += f"**{i}. Similarity: {res.get('similarity', 0):.3f}**\n"
+                            result += f"   🆔 Vector ID: `{res.get('vector_id', 'unknown')}`\n"
+                            result += f"   📄 Document: `{res.get('doc_path', 'unknown')}`\n"
+                            result += f"   🏷️ Source: {res.get('source_type', 'unknown')}\n"
+                            result += f"   📊 Chunk: {res.get('chunk_index', 0)}\n"
+                            result += f"   📝 Preview: {res.get('content_preview', 'No preview')}\n\n"
+                    else:
+                        result += "❌ **No results found**\n"
+                        result += "💡 Try lowering the similarity threshold or using different search terms.\n"
+                    
+                    return result
+                else:
+                    return f"❌ **Search failed:** {data.get('error', 'Unknown error')}"
+            else:
+                return f"❌ **HTTP Error {response.status_code}:** {self._safe_response_text(response)}"
+                
+        except Exception as e:
+            return f"❌ **Error searching vectors:** {str(e)}"
+    
+    # ========================================================================================
+    # QUERY PERFORMANCE MONITORING METHODS
+    # ========================================================================================
+    
+    def get_query_performance_metrics(self, time_range_hours: int = 24, limit: int = 50) -> str:
+        """Get comprehensive query performance analytics"""
+        try:
+            params = {
+                'limit': limit,
+                'include_details': True,
+                'time_range_hours': time_range_hours
+            }
+            
+            response = requests.get(f"{self.api_url}/performance/queries", params=params, timeout=30)
+            
+            if response.status_code == 200:
+                data = response.json()
+                if data.get('success'):
+                    perf_data = data.get('data', {})
+                    stats = perf_data.get('performance_stats', {})
+                    complexity = perf_data.get('complexity_stats', {})
+                    errors = perf_data.get('error_analysis', {})
+                    recent_queries = perf_data.get('recent_queries', [])
+                    
+                    result = f"📈 **Query Performance Analytics**\n\n"
+                    result += f"⏰ **Time Range:** Last {time_range_hours} hours\n"
+                    result += f"📊 **Data Points:** {perf_data.get('data_points', 0)} queries\n\n"
+                    
+                    # Performance statistics
+                    result += "🚀 **Performance Statistics:**\n"
+                    result += f"📝 Total queries: {stats.get('total_queries', 0)}\n"
+                    result += f"⏱️ Avg response time: {stats.get('avg_response_time', 0):.3f}s\n"
+                    result += f"🚀 Min response time: {stats.get('min_response_time', 0):.3f}s\n"
+                    result += f"🐌 Max response time: {stats.get('max_response_time', 0):.3f}s\n"
+                    result += f"✅ Success rate: {stats.get('success_rate', 0):.1f}%\n"
+                    result += f"❌ Error rate: {stats.get('error_rate', 0):.1f}%\n\n"
+                    
+                    # Component breakdown
+                    result += "🔧 **Component Performance:**\n"
+                    result += f"🧠 Avg embedding time: {stats.get('avg_embedding_time', 0):.3f}s\n"
+                    result += f"🔍 Avg search time: {stats.get('avg_search_time', 0):.3f}s\n"
+                    result += f"🤖 Avg LLM time: {stats.get('avg_llm_time', 0):.3f}s\n\n"
+                    
+                    # Query complexity
+                    result += "📊 **Query Complexity:**\n"
+                    result += f"📏 Avg query length: {complexity.get('avg_query_length', 0):.0f} characters\n"
+                    result += f"📄 Avg sources returned: {complexity.get('avg_sources_returned', 0):.1f}\n"
+                    result += f"📈 Max sources returned: {complexity.get('max_sources_returned', 0)}\n\n"
+                    
+                    # Error analysis
+                    if errors.get('total_errors', 0) > 0:
+                        result += "❌ **Error Analysis:**\n"
+                        result += f"🔢 Total errors: {errors.get('total_errors', 0)}\n"
+                        error_types = errors.get('error_types', {})
+                        for error_type, count in error_types.items():
+                            result += f"   • {error_type}: {count}\n"
+                        result += "\n"
+                    
+                    # Recent queries
+                    if recent_queries:
+                        result += f"📋 **Recent Queries** (last {min(len(recent_queries), 10)}):\n\n"
+                        for i, query_log in enumerate(recent_queries[-10:], 1):
+                            status = "✅" if query_log.get('success') else "❌"
+                            result += f"{i}. {status} **{query_log.get('response_time', 0):.3f}s** - "
+                            result += f"'{query_log.get('query', 'unknown')[:50]}...'\n"
+                            
+                            if query_log.get('embedding_time'):
+                                result += f"   🧠 Embedding: {query_log.get('embedding_time', 0):.3f}s, "
+                                result += f"🔍 Search: {query_log.get('search_time', 0):.3f}s, "
+                                result += f"🤖 LLM: {query_log.get('llm_time', 0):.3f}s\n"
+                            
+                            result += f"   📄 Sources: {query_log.get('sources_count', 0)}\n\n"
+                    
+                    return result
+                else:
+                    return f"❌ **Failed to get performance metrics:** {data.get('error', 'Unknown error')}"
+            else:
+                return f"❌ **HTTP Error {response.status_code}:** {self._safe_response_text(response)}"
+                
+        except Exception as e:
+            return f"❌ **Error getting performance metrics:** {str(e)}"
+    
+    def test_query_performance(self, query: str, max_results: int = 3) -> str:
+        """Test query performance with detailed timing breakdown"""
+        try:
+            if not query.strip():
+                return "❌ **Please provide a test query**"
+            
+            payload = {
+                'query': query.strip(),
+                'max_results': max_results
+            }
+            
+            response = requests.post(f"{self.api_url}/performance/test", json=payload, timeout=60)
+            
+            if response.status_code == 200:
+                data = response.json()
+                if data.get('success'):
+                    perf_data = data.get('data', {})
+                    component_times = perf_data.get('component_times', {})
+                    breakdown = perf_data.get('performance_breakdown', {})
+                    results = perf_data.get('results', {})
+                    
+                    result = f"🧪 **Query Performance Test**\n\n"
+                    result += f"🎯 **Query:** '{perf_data.get('query', 'unknown')}'\n\n"
+                    
+                    # Overall timing
+                    result += "⏱️ **Overall Performance:**\n"
+                    result += f"🚀 Total time: **{perf_data.get('total_time', 0):.3f} seconds**\n\n"
+                    
+                    # Component breakdown
+                    result += "🔧 **Component Breakdown:**\n"
+                    embedding_time = component_times.get('embedding', 0)
+                    search_time = component_times.get('search', 0)
+                    llm_time = component_times.get('llm', 0)
+                    
+                    result += f"🧠 **Embedding Generation:** {embedding_time:.3f}s ({breakdown.get('embedding_percentage', 0):.1f}%)\n"
+                    result += f"🔍 **Vector Search:** {search_time:.3f}s ({breakdown.get('search_percentage', 0):.1f}%)\n"
+                    result += f"🤖 **LLM Generation:** {llm_time:.3f}s ({breakdown.get('llm_percentage', 0):.1f}%)\n\n"
+                    
+                    # Results summary
+                    result += "📊 **Results Summary:**\n"
+                    result += f"📄 Sources found: {results.get('sources_found', 0)}\n"
+                    result += f"📐 Embedding dimension: {results.get('embedding_dimension', 'unknown')}\n\n"
+                    
+                    # Performance analysis
+                    result += "🔍 **Performance Analysis:**\n"
+                    total_time = perf_data.get('total_time', 0)
+                    
+                    if total_time < 1.0:
+                        result += "✅ **Excellent** - Very fast response time\n"
+                    elif total_time < 2.0:
+                        result += "🟢 **Good** - Acceptable response time\n"
+                    elif total_time < 5.0:
+                        result += "🟡 **Fair** - Could be optimized\n"
+                    else:
+                        result += "🔴 **Slow** - Performance optimization needed\n"
+                    
+                    # Component analysis
+                    if breakdown.get('llm_percentage', 0) > 70:
+                        result += "💡 **Tip:** LLM is the bottleneck - consider shorter context or faster model\n"
+                    elif breakdown.get('search_percentage', 0) > 50:
+                        result += "💡 **Tip:** Search is slow - consider index optimization\n"
+                    elif breakdown.get('embedding_percentage', 0) > 30:
+                        result += "💡 **Tip:** Embedding generation is slow - consider caching\n"
+                    
+                    # Error handling
+                    if 'llm_error' in component_times:
+                        result += f"\n❌ **LLM Error:** {component_times['llm_error']}\n"
+                    
+                    return result
+                else:
+                    return f"❌ **Performance test failed:** {data.get('error', 'Unknown error')}"
+            else:
+                return f"❌ **HTTP Error {response.status_code}:** {self._safe_response_text(response)}"
+                
+        except Exception as e:
+            return f"❌ **Error testing query performance:** {str(e)}"
+    
+    def get_system_performance(self) -> str:
+        """Get real-time system performance metrics"""
+        try:
+            response = requests.get(f"{self.api_url}/performance/system", timeout=30)
+            
+            if response.status_code == 200:
+                data = response.json()
+                if data.get('success'):
+                    sys_data = data.get('data', {})
+                    sys_resources = sys_data.get('system_resources', {})
+                    process_resources = sys_data.get('process_resources', {})
+                    vector_store = sys_data.get('vector_store', {})
+                    query_perf = sys_data.get('query_performance', {})
+                    
+                    result = f"🖥️ **System Performance Monitor**\n\n"
+                    result += f"⏰ **Timestamp:** {data.get('timestamp', 'unknown')}\n\n"
+                    
+                    # System resources
+                    memory = sys_resources.get('memory', {})
+                    cpu = sys_resources.get('cpu', {})
+                    disk = sys_resources.get('disk', {})
+                    
+                    result += "💾 **System Memory:**\n"
+                    result += f"📊 Usage: {memory.get('percent_used', 0):.1f}%\n"
+                    result += f"📈 Used: {memory.get('used', 0) / (1024**3):.1f} GB\n"
+                    result += f"📉 Available: {memory.get('available', 0) / (1024**3):.1f} GB\n"
+                    result += f"📏 Total: {memory.get('total', 0) / (1024**3):.1f} GB\n\n"
+                    
+                    result += "🖥️ **CPU Usage:**\n"
+                    result += f"📊 Current: {cpu.get('percent_used', 0):.1f}%\n"
+                    result += f"🔢 Cores: {cpu.get('core_count', 'unknown')}\n\n"
+                    
+                    result += "💽 **Disk Usage:**\n"
+                    result += f"📊 Usage: {disk.get('percent_used', 0):.1f}%\n"
+                    result += f"📈 Used: {disk.get('used', 0) / (1024**3):.1f} GB\n"
+                    result += f"📉 Free: {disk.get('free', 0) / (1024**3):.1f} GB\n\n"
+                    
+                    # Process resources
+                    proc_memory = process_resources.get('memory', {})
+                    result += "🔧 **RAG Process Resources:**\n"
+                    result += f"💾 Memory (RSS): {proc_memory.get('rss', 0) / (1024**2):.1f} MB\n"
+                    result += f"📊 CPU: {process_resources.get('cpu_percent', 0):.1f}%\n"
+                    result += f"🧵 Threads: {process_resources.get('threads', 0)}\n"
+                    result += f"📁 Open files: {process_resources.get('open_files', 0)}\n\n"
+                    
+                    # Vector store health
+                    result += "🗄️ **Vector Store Health:**\n"
+                    result += f"📊 Total vectors: {vector_store.get('ntotal', 0)}\n"
+                    result += f"✅ Active vectors: {vector_store.get('active_vectors', 0)}\n"
+                    result += f"🗑️ Deleted vectors: {vector_store.get('deleted_vectors', 0)}\n"
+                    result += f"📐 Dimension: {vector_store.get('dimension', 'unknown')}\n\n"
+                    
+                    # Query performance summary
+                    result += "🚀 **Query Performance Summary:**\n"
+                    result += f"📝 Total logged queries: {query_perf.get('total_logged_queries', 0)}\n"
+                    result += f"⏱️ Recent avg response time: {query_perf.get('recent_avg_response_time', 0):.3f}s\n\n"
+                    
+                    # Health indicators
+                    result += "🚦 **Health Indicators:**\n"
+                    
+                    # Memory health
+                    memory_usage = memory.get('percent_used', 0)
+                    if memory_usage < 70:
+                        result += "✅ Memory: Healthy\n"
+                    elif memory_usage < 85:
+                        result += "🟡 Memory: Warning\n"
+                    else:
+                        result += "🔴 Memory: Critical\n"
+                    
+                    # CPU health
+                    cpu_usage = cpu.get('percent_used', 0)
+                    if cpu_usage < 70:
+                        result += "✅ CPU: Healthy\n"
+                    elif cpu_usage < 90:
+                        result += "🟡 CPU: Warning\n"
+                    else:
+                        result += "🔴 CPU: Critical\n"
+                    
+                    # Disk health
+                    disk_usage = disk.get('percent_used', 0)
+                    if disk_usage < 80:
+                        result += "✅ Disk: Healthy\n"
+                    elif disk_usage < 95:
+                        result += "🟡 Disk: Warning\n"
+                    else:
+                        result += "🔴 Disk: Critical\n"
+                    
+                    return result
+                else:
+                    return f"❌ **Failed to get system performance:** {data.get('error', 'Unknown error')}"
+            else:
+                return f"❌ **HTTP Error {response.status_code}:** {self._safe_response_text(response)}"
+                
+        except Exception as e:
+            return f"❌ **Error getting system performance:** {str(e)}"
+
 def create_fixed_interface():
     """Create the fixed document lifecycle management interface"""
     
@@ -2306,11 +3940,9 @@ def create_fixed_interface():
     }
     """
     
-    with gr.Blocks(css=css, title="RAG System - Fixed Document Lifecycle") as interface:
+    with gr.Blocks(css=css, title="AI Force Intelligent Support Agent") as interface:
         
-        gr.Markdown("""
-        # 📁 Network Knowledge Management
-        """)
+        gr.Markdown("# **AI Force Intelligent Support Agent**")
         
         # Connection Status
         with gr.Row():
@@ -2405,11 +4037,49 @@ def create_fixed_interface():
                 
                 with gr.Row():
                     with gr.Column(scale=2):
-                        test_query_input = gr.Textbox(
-                            label="🔍 Test Query",
-                            placeholder="Enter a query to test document lifecycle effects...",
-                            lines=2
-                        )
+                        gr.Markdown("### 🔍 Query Input")
+                        gr.Markdown("**Choose one of the following methods to test queries:**")
+                        
+                        # Method 1: Simple textbox
+                        with gr.Group():
+                            gr.Markdown("#### Method 1: Direct Query Input")
+                            test_query_input = gr.Textbox(
+                                label="Enter your query here",
+                                placeholder="Type your question...",
+                                lines=1,
+                                interactive=True
+                            )
+                            test_direct_btn = gr.Button("🔍 Test Direct Query", variant="primary")
+                        
+                        # Method 2: Dropdown with common queries
+                        with gr.Group():
+                            gr.Markdown("#### Method 2: Pre-defined Queries")
+                            common_queries = [
+                                "What is the company policy?",
+                                "How do I configure the system?", 
+                                "What are the network requirements?",
+                                "Who is Maia Garcia?",
+                                "Tell me about the application process",
+                                "What documents do I need?"
+                            ]
+                            query_dropdown = gr.Dropdown(
+                                choices=common_queries,
+                                label="Select a common query",
+                                value=None
+                            )
+                            test_dropdown_btn = gr.Button("🔍 Test Selected Query", variant="secondary")
+                        
+                        # Method 3: Manual text area
+                        with gr.Group():
+                            gr.Markdown("#### Method 3: Text Area Input")
+                            test_textarea = gr.Textbox(
+                                label="Enter query in text area",
+                                placeholder="Type your question here...",
+                                lines=3,
+                                max_lines=5,
+                                interactive=True
+                            )
+                            test_textarea_btn = gr.Button("🔍 Test Text Area Query", variant="secondary")
                         
                         max_results_slider = gr.Slider(
                             minimum=1,
@@ -2419,24 +4089,28 @@ def create_fixed_interface():
                             label="Maximum Results"
                         )
                         
-                        test_query_btn = gr.Button("🔍 Test Query", variant="primary")
+                        # Fallback method
+                        with gr.Group():
+                            gr.Markdown("#### Fallback: Hardcoded Test")
+                            test_hardcoded_btn = gr.Button("🧪 Test Hardcoded Query", variant="secondary")
                     
                     with gr.Column(scale=1):
-                        gr.Markdown("#### 💡 Improved Testing Flow")
+                        gr.Markdown("#### 💡 Query Testing Tips")
                         gr.Markdown("""
-                        **Simple Workflow:**
-                        1. 📁 Upload a document file
-                        2. 🔍 Query for content → should appear
-                        3. 📁 Upload different file with same path
-                        4. 🔍 Query again → should show updated content
-                        5. 🗑️ Delete the document
-                        6. 🔍 Query again → should show deletion marker
+                        **How to test:**
+                        1. Enter your question in the query box
+                        2. Adjust max results if needed
+                        3. Click "Test Query" to see results
                         
-                        **No more confusion:**
-                        - ✅ Same interface for upload and update
-                        - ✅ Automatic dropdown refresh
-                        - ✅ Clear status messages
-                        - ✅ Upload count tracking
+                        **What you'll see:**
+                        - 🤖 **AI Response**: Generated answer
+                        - 📚 **Sources**: Documents used
+                        - 🔍 **Analysis**: Document lifecycle info
+                        
+                        **Try these example queries:**
+                        - "What is the company policy?"
+                        - "How do I configure the system?"
+                        - "What are the network requirements?"
                         """)
                 
                 # Query Results
@@ -2604,33 +4278,36 @@ def create_fixed_interface():
             with gr.Tab("📁 Folder Monitor"):
                 gr.Markdown("### 🔍 Automatic Folder Monitoring")
                 gr.Markdown("""
-                **Monitor a folder for file changes and automatically sync with RAG system:**
+                **Monitor folders for file changes and automatically sync with RAG system:**
                 - 📁 **New files** → Automatically uploaded
                 - 🔄 **Modified files** → Automatically updated
                 - 🗑️ **Deleted files** → Automatically removed from vector store
-                - ⏰ **Check interval**: Every 60 seconds
+                - ⏰ **Check interval**: Every 30 seconds (configurable)
+                - 📊 **Real-time status** → See what files are processed and what failed
                 """)
                 
                 with gr.Row():
                     with gr.Column(scale=2):
                         # Folder monitoring controls
                         monitor_folder_input = gr.Textbox(
-                            label="📁 Folder Path to Monitor",
+                            label="📁 Folder Path to Monitor (Optional)",
                             placeholder="e.g., C:\\Documents\\MyDocs or /home/user/documents",
-                            info="Enter the full path to the folder you want to monitor. If already monitored, status will be confirmed."
+                            info="Enter a folder path to add it to monitoring, or leave empty to just start the monitoring service."
                         )
                         
                         with gr.Row():
                             start_monitor_btn = gr.Button("🟢 Start/Resume Monitoring", variant="primary")
                             stop_monitor_btn = gr.Button("🛑 Stop Monitoring", variant="stop")
                             status_refresh_btn = gr.Button("🔄 Refresh Status", variant="secondary")
+                            force_scan_btn = gr.Button("🔍 Force Scan", variant="secondary")
                         
                         gr.Markdown("""
                         **💡 How to use:**
-                        1. **Enter folder path** (must exist and be accessible)
-                        2. **Click "Start/Resume Monitoring"** (safe to click even if already monitored)
-                        3. **Check status** to see if monitoring is active
-                        4. **Add/modify files** in the folder to test auto-ingestion
+                        1. **Option A - Start monitoring service:** Leave folder path empty and click "Start/Resume Monitoring"
+                        2. **Option B - Add folder and start:** Enter folder path and click "Start/Resume Monitoring"
+                        3. **Check status** to see if monitoring is active and what folders are monitored
+                        4. **Add/modify files** in monitored folders to test auto-ingestion
+                        5. **Use "Force Scan"** to immediately check for changes
                         """)
                         
                         monitor_result = gr.Markdown(
@@ -2646,6 +4323,26 @@ def create_fixed_interface():
                             value="📴 **Monitoring Status:** Inactive"
                         )
                         
+                        # Real-time refresh controls
+                        with gr.Row():
+                            auto_refresh_checkbox = gr.Checkbox(
+                                label="🔄 Auto-refresh every 30 seconds",
+                                value=False,
+                                info="Automatically update status and file details"
+                            )
+                        
+                        gr.Markdown("---")
+                        
+                        gr.Markdown("#### 📄 File Processing Status")
+                        
+                        file_status_display = gr.Markdown(
+                            value="*Click 'Refresh Status' to see file processing details*",
+                            visible=True
+                        )
+                        
+                        with gr.Row():
+                            refresh_files_btn = gr.Button("📄 Refresh File Status", variant="secondary", size="sm")
+                        
                         gr.Markdown("---")
                         
                         gr.Markdown("#### 🗂️ Manage Individual Folders")
@@ -2657,6 +4354,12 @@ def create_fixed_interface():
                         
                         with gr.Row():
                             refresh_folders_btn = gr.Button("🔄 Refresh Folders", variant="secondary", size="sm")
+                            sync_config_btn = gr.Button("🔄 Sync Config", variant="secondary", size="sm")
+                        
+                        gr.Markdown("""
+                        **🔄 Sync Config**: Updates configuration file with current backend state  
+                        **🔄 Refresh Folders**: Shows current monitored folders from backend
+                        """)
                             
                         folder_selector = gr.Dropdown(
                             label="Select Folder to Remove",
@@ -2677,25 +4380,39 @@ def create_fixed_interface():
                         gr.Markdown("---")
                         
                         gr.Markdown("#### 📋 Supported File Types")
-                        gr.Markdown("""
+                        
+                        file_types_display = gr.Markdown("""
                         - 📄 **Text files**: .txt, .md
                         - 📊 **Data files**: .json, .csv
-                        - 📖 **Documents**: .pdf, .docx, .doc
+                        - 📖 **PDF Documents**: .pdf
+                        - 📝 **Word Documents**: .docx, .doc
                         - 📊 **Excel files**: .xlsx, .xls, .xlsm, .xlsb
+                        - 🎯 **PowerPoint**: .pptx, .ppt
+                        - 🖼️ **Images**: .jpg, .jpeg, .png, .gif, .bmp, .tiff, .tif, .webp, .svg
+                        - 📐 **Visio Diagrams**: .vsdx, .vsd, .vsdm, .vstx, .vst, .vstm
                         
+                        *Click "Show Details" for comprehensive file type information*
+                        """)
+                        
+                        with gr.Row():
+                            show_file_types_btn = gr.Button("📋 Show File Type Details", variant="secondary", size="sm")
+                            hide_file_types_btn = gr.Button("📋 Hide Details", variant="secondary", size="sm", visible=False)
+                        
+                        gr.Markdown("""
                         #### 🔄 How It Works
                         1. **Start monitoring** a folder
                         2. **Add/modify/delete** files in that folder
                         3. **System automatically syncs** changes
-                        4. **Check console** for real-time updates
+                        4. **Check file status** to see processing details
                         5. **Query testing** to verify changes
                         
                         #### ⚠️ Important Notes
                         - Multiple folders can be monitored simultaneously
-                        - Files are checked every 60 seconds
+                        - Files are checked every 30 seconds
                         - Large files may take time to process
-                        - Use "Manage Individual Folders" to remove specific folders
-                        - Monitor console output for detailed logs
+                        - Use "Auto-refresh" for real-time updates
+                        - Check "File Processing Status" for detailed info
+                        - Images and diagrams are processed using OCR when available
                          """)
             
             # Vector Store Diagnostics Tab
@@ -2741,6 +4458,15 @@ def create_fixed_interface():
                         - Fixes dropdown and registry display issues
                         """)
                         sync_registry_btn = gr.Button("🔄 Sync Registry with Vector Store", variant="stop")
+                        
+                        gr.Markdown("#### 🔍 Document Discovery")
+                        gr.Markdown("""
+                        **🔍 Search-based document discovery:**
+                        - Searches vector store for documents via queries
+                        - Adds found documents to UI registry
+                        - Useful when backend is running but initial sync failed
+                        """)
+                        discover_docs_btn = gr.Button("🔍 Discover Documents via Search", variant="secondary")
                         
                         diagnostics_result = gr.Markdown(
                             label="Diagnostics Result",
@@ -2953,109 +4679,152 @@ def create_fixed_interface():
 
             # Conversation Chat Tab
             with gr.Tab("💬 Conversation Chat"):
-                gr.Markdown("### 🤖 Enhanced Conversational Chat with Smart Suggestions")
-                gr.Markdown("""
-                **Engage in intelligent conversations with your RAG system:**
-                - 🧠 **Multi-turn conversations** with context retention
-                - 🔍 **Knowledge-based responses** using your document database
-                - 💡 **Smart follow-up suggestions** with one-click responses
-                - 🎯 **Topic exploration** with interactive chips
-                - 📊 **Conversation analytics** and session management
-                - ⚡ **Quick actions** and contextual hints
-                """)
-                
-                # Streaming toggle
                 with gr.Row():
-                    gr.Markdown("**⚡ Response Mode:**")
-                    streaming_toggle = gr.Checkbox(
-                        label="🌊 Enable Streaming Responses",
-                        value=True,
-                        info="Stream responses in real-time for better user experience"
-                    )
-                
-                with gr.Row():
-                    with gr.Column(scale=2):
-                        # Main conversation area
-                        chatbot = gr.Chatbot(
-                            label="💬 Conversation",
-                            height=400,
-                            show_label=True,
-                            container=True,
-                            type="messages",
-                            show_copy_button=True
-                        )
-                        
-                        # Message input area
+                    # Left sidebar for chat history and controls (ChatGPT style)
+                    with gr.Column(scale=1, min_width=300):
+                        # New Chat button at top
                         with gr.Row():
-                            message_input = gr.Textbox(
-                                placeholder="Type your message here... Press Enter to send",
-                                label="Your Message",
-                                lines=2,
-                                scale=4,
-                                show_copy_button=False
+                            new_chat_btn = gr.Button("🆕 New Chat", variant="primary", size="lg")
+                        
+                        # Chat History
+                        with gr.Group():
+                            gr.Markdown("### 📚 Chat History")
+                            
+                            # Refresh history button
+                            refresh_history_btn = gr.Button("🔄 Refresh", variant="secondary", size="sm")
+                            
+                            # History dropdown
+                            chat_history_dropdown = gr.Dropdown(
+                                label="Previous Conversations",
+                                choices=[],
+                                value=None,
+                                interactive=True,
+                                allow_custom_value=False
                             )
-                            send_button = gr.Button("📤 Send", variant="primary", scale=1)
+                            
+                            # History actions
+                            with gr.Row():
+                                load_chat_btn = gr.Button("📂 Load", variant="secondary", size="sm")
+                                delete_chat_btn = gr.Button("🗑️ Delete", variant="stop", size="sm")
                         
-                        # Enhanced suggestion area
+                        # Settings & Controls
                         with gr.Group():
-                            gr.Markdown("### 💡 Smart Suggestions")
+                            gr.Markdown("### ⚙️ Chat Settings")
                             
-                            # Quick suggestion buttons
-                            with gr.Row():
-                                suggestion_btn_1 = gr.Button("", variant="secondary", visible=False, scale=1)
-                                suggestion_btn_2 = gr.Button("", variant="secondary", visible=False, scale=1)
-                                suggestion_btn_3 = gr.Button("", variant="secondary", visible=False, scale=1)
-                                suggestion_btn_4 = gr.Button("", variant="secondary", visible=False, scale=1)
+                            # Enhanced checkboxes for features
+                            streaming_toggle = gr.Checkbox(
+                                label="🌊 Enable Streaming",
+                                value=True,
+                                info="Real-time response streaming"
+                            )
                             
-                            # Topic exploration chips
-                            with gr.Row():
-                                gr.Markdown("**🔍 Explore Topics:**")
+                            show_sources_toggle = gr.Checkbox(
+                                label="📚 Show Sources",
+                                value=False,  # Changed to False - user can enable if needed
+                                info="Display source documents"
+                            )
                             
-                            with gr.Row():
-                                topic_chip_1 = gr.Button("", variant="outline", visible=False, size="sm")
-                                topic_chip_2 = gr.Button("", variant="outline", visible=False, size="sm")
-                                topic_chip_3 = gr.Button("", variant="outline", visible=False, size="sm")
-                                topic_chip_4 = gr.Button("", variant="outline", visible=False, size="sm")
-                                topic_chip_5 = gr.Button("", variant="outline", visible=False, size="sm")
-                                topic_chip_6 = gr.Button("", variant="outline", visible=False, size="sm")
+                            show_suggestions_toggle = gr.Checkbox(
+                                label="💡 Smart Suggestions",
+                                value=True,
+                                info="Show follow-up questions"
+                            )
+                            
+                            show_topics_toggle = gr.Checkbox(
+                                label="🔍 Topic Exploration",
+                                value=True,
+                                info="Show explorable topics"
+                            )
+                            
+                            show_insights_toggle = gr.Checkbox(
+                                label="🎯 Conversation Insights",
+                                value=False,
+                                info="Show conversation analytics"
+                            )
                         
-                        # Conversation controls
-                        with gr.Row():
-                            start_conversation_btn = gr.Button("🆕 Start New Conversation", variant="primary")
-                            end_conversation_btn = gr.Button("🔚 End Conversation", variant="stop")
-                            clear_suggestions_btn = gr.Button("🧹 Clear Suggestions", variant="secondary", size="sm")
-                    
-                    with gr.Column(scale=1):
-                        # Enhanced session information
+                        # Current Thread Info
                         with gr.Group():
-                            gr.Markdown("#### ℹ️ Thread Info")
+                            gr.Markdown("### ℹ️ Current Thread")
                             
                             thread_id_display = gr.Textbox(
                                 label="Thread ID",
-                                value="No thread",
+                                value="",
                                 interactive=False,
-                                max_lines=1
+                                max_lines=1,
+                                show_copy_button=True
                             )
                             
                             conversation_status = gr.Markdown(
-                                label="Conversation Status",
-                                value="No active conversation"
+                                value="🔄 Starting new conversation..."
                             )
+                    
+                    # Main chat area (ChatGPT style)
+                    with gr.Column(scale=3):
+                        # Chat display
+                        chatbot = gr.Chatbot(
+                            label="",
+                            height=500,
+                            show_label=False,
+                            container=True,
+                            type="messages",
+                            show_copy_button=True,
+                            bubble_full_width=False,
+                            value=[]  # Will be populated by auto-start
+                        )
+                        
+                        # Message input area (bottom)
+                        with gr.Row():
+                            message_input = gr.Textbox(
+                                placeholder="Message ChatRAG... Press Enter to send",
+                                label="",
+                                lines=2,
+                                scale=4,
+                                show_copy_button=False,
+                                show_label=False,
+                                container=False
+                            )
+                            send_button = gr.Button("📤", variant="primary", scale=1, size="lg")
+                        
+                        # Dynamic suggestion area (conditionally shown)
+                        suggestions_container = gr.Group(visible=True)
+                        with suggestions_container:
+                            # Smart suggestions (shown when enabled)
+                            suggestions_group = gr.Group(visible=False)
+                            with suggestions_group:
+                                gr.Markdown("### 💡 Smart Suggestions")
+                                with gr.Row():
+                                    suggestion_btn_1 = gr.Button("", variant="secondary", visible=False, scale=1)
+                                    suggestion_btn_2 = gr.Button("", variant="secondary", visible=False, scale=1)
+                                    suggestion_btn_3 = gr.Button("", variant="secondary", visible=False, scale=1)
+                                    suggestion_btn_4 = gr.Button("", variant="secondary", visible=False, scale=1)
                             
+                            # Topic exploration (shown when enabled)
+                            topics_group = gr.Group(visible=False)
+                            with topics_group:
+                                gr.Markdown("### 🔍 Explore Topics")
+                                with gr.Row():
+                                    topic_chip_1 = gr.Button("", variant="outline", visible=False, size="sm")
+                                    topic_chip_2 = gr.Button("", variant="outline", visible=False, size="sm")
+                                    topic_chip_3 = gr.Button("", variant="outline", visible=False, size="sm")
+                                    topic_chip_4 = gr.Button("", variant="outline", visible=False, size="sm")
+                                    topic_chip_5 = gr.Button("", variant="outline", visible=False, size="sm")
+                                    topic_chip_6 = gr.Button("", variant="outline", visible=False, size="sm")
+                        
+                        # Insights and additional info (conditionally shown)
+                        insights_container = gr.Group(visible=False)
+                        with insights_container:
                             # Conversation insights
                             conversation_insights = gr.Markdown(
                                 label="💡 Conversation Insights",
                                 value="",
                                 visible=False
                             )
-                        
-                        # Interactive hints and guidance
-                        with gr.Group():
-                            gr.Markdown("#### 🎯 Interactive Hints")
                             
+                            # Interactive hints
                             interaction_hints = gr.Markdown(
-                                label="Current Hints",
-                                value="💡 Start a conversation to see personalized hints and suggestions!"
+                                label="🎯 Interactive Hints",
+                                value="",
+                                visible=False
                             )
                             
                             # Entity exploration
@@ -3072,59 +4841,16 @@ def create_fixed_interface():
                                 visible=False
                             )
                         
-                        # Enhanced how-to guide
-                        with gr.Group():
-                            gr.Markdown("#### 🚀 Enhanced Features")
-                            gr.Markdown("""
-                                **Smart Suggestions:**
-                                - 💡 **One-click questions**: Generated based on context
-                                - ⚡ **Quick responses**: Pre-computed answers for common follow-ups
-                                - 🎯 **Prioritized suggestions**: Most relevant questions first
-                                - 🔍 **Context-aware**: Suggestions adapt to conversation flow
-                                
-                                **Topic Exploration:**
-                                - 🏷️ **Topic chips**: Click to explore related areas
-                                - 👥 **Entity cards**: Discover people, places, products
-                                - 🔧 **Technical terms**: Get definitions and explanations
-                                - 📊 **Related areas**: Find connected topics
-                                
-                                **Conversation Intelligence:**
-                                - 📈 **Conversation health**: Real-time quality assessment
-                                - 🎯 **Exploration paths**: Suggested conversation directions
-                                - 💬 **Context retention**: Maintains conversation memory
-                                - 📊 **Turn analytics**: Track conversation depth and coverage
-                                """)
-                        
-                        # Advanced tips
-                        with gr.Group():
-                            gr.Markdown("#### 💡 Pro Tips")
-                            gr.Markdown("""
-                                **Getting Better Suggestions:**
-                                - Ask specific questions about your documents
-                                - Use natural, conversational language
-                                - Build on previous responses for deeper insights
-                                - Click suggestion buttons for instant follow-ups
-                                
-                                **Topic Exploration:**
-                                - Click topic chips to dive deeper
-                                - Explore entities mentioned in responses
-                                - Ask about technical terms for definitions
-                                - Follow suggested exploration paths
-                                
-                                **Conversation Flow:**
-                                - Start with broad questions, then get specific
-                                - Use clarification suggestions when confused
-                                - Explore related topics for comprehensive understanding
-                                - End conversations when you have what you need
-                                """)
-                        
-                        # Debug information (collapsible)
-                        with gr.Accordion("🔧 Debug Info", open=False):
+                        # Debug info (collapsible, hidden by default)
+                        with gr.Accordion("🔧 Debug Info", open=False, visible=False) as debug_accordion:
                             debug_info = gr.JSON(
                                 label="Last Response Data",
                                 value={},
                                 visible=True
                             )
+                
+                # Hidden components for internal state management
+                clear_suggestions_btn = gr.Button("Clear", visible=False)  # Hidden clear button
 
             # Help Tab
             with gr.Tab("❓ Help"):
@@ -3176,8 +4902,7 @@ def create_fixed_interface():
                 ```
 
                 ### 4. **Test Query Again**
-                ```
-                🔍 Query: "content from my document"
+                                🔍 Query: "content from my document"
                 Result: Should show NEW content from updated file
                 ```
 
@@ -3268,6 +4993,21 @@ def create_fixed_interface():
 
                 ## 🔍 Testing the Lifecycle
 
+                ### **Query Testing Flow**
+                **Simple Workflow:**
+                1. 📁 Upload a document file
+                2. 🔍 Query for content → should appear
+                3. 📁 Upload different file with same path
+                4. 🔍 Query again → should show updated content
+                5. 🗑️ Delete the document
+                6. 🔍 Query again → should show deletion marker
+                
+                **No more confusion:**
+                - ✅ Same interface for upload and update
+                - ✅ Automatic dropdown refresh
+                - ✅ Clear status messages
+                - ✅ Upload count tracking
+
                 ### **Test Document Updates**
                 1. Upload file with content "Version 1"
                 2. Query for that content → should find it
@@ -3326,7 +5066,908 @@ def create_fixed_interface():
                 ---
 
                 **🎯 This fixed interface provides a much better user experience for document lifecycle management with ServiceNow integration!**
+                
+                ## 🚀 Enhanced Conversation Features
+
+                ### **Smart Suggestions:**
+                - 💡 **One-click questions**: Generated based on context
+                - ⚡ **Quick responses**: Pre-computed answers for common follow-ups
+                - 🎯 **Prioritized suggestions**: Most relevant questions first
+                - 🔍 **Context-aware**: Suggestions adapt to conversation flow
+                
+                ### **Topic Exploration:**
+                - 🏷️ **Topic chips**: Click to explore related areas
+                - 👥 **Entity cards**: Discover people, places, products
+                - 🔧 **Technical terms**: Get definitions and explanations
+                - 📊 **Related areas**: Find connected topics
+                
+                ### **Conversation Intelligence:**
+                - 📈 **Conversation health**: Real-time quality assessment
+                - 🎯 **Exploration paths**: Suggested conversation directions
+                - 💬 **Context retention**: Maintains conversation memory
+                - 📊 **Turn analytics**: Track conversation depth and coverage
+
+                ## 💡 Conversation Pro Tips
+
+                ### **Getting Better Suggestions:**
+                - Ask specific questions about your documents
+                - Use natural, conversational language
+                - Build on previous responses for deeper insights
+                - Click suggestion buttons for instant follow-ups
+                
+                ### **Topic Exploration:**
+                - Click topic chips to dive deeper
+                - Explore entities mentioned in responses
+                - Ask about technical terms for definitions
+                - Follow suggested exploration paths
+                
+                ### **Conversation Flow:**
+                - Start with broad questions, then get specific
+                - Use clarification suggestions when confused
+                - Explore related topics for comprehensive understanding
+                - End conversations when you have what you need
+                
+                ## 🤖 Enhanced Conversational Chat with Smart Suggestions
+                
+                **Engage in intelligent conversations with your RAG system:**
+                - 🧠 **Multi-turn conversations** with context retention
+                - 🔍 **Knowledge-based responses** using your document database
+                - 💡 **Smart follow-up suggestions** with one-click responses
+                - 🎯 **Topic exploration** with interactive chips
+                - 📊 **Conversation analytics** and session management
+                - ⚡ **Quick actions** and contextual hints
+                
+                ## 🔍 What is Topic Exploration?
+                
+                **Topic Exploration** is an intelligent feature that helps you discover related concepts and areas of interest based on your conversation:
+                
+                ### **How it works:**
+                - 🎯 **Analyzes your conversation** to identify key topics and themes
+                - 🔗 **Finds related concepts** from your document database
+                - 💡 **Suggests exploration paths** to deepen your understanding
+                - 🏷️ **Creates clickable topic chips** for easy navigation
+                
+                ### **Topic Chips:**
+                - **🔍 Click any topic chip** to explore that subject
+                - **Automatically generates questions** about the selected topic
+                - **Maintains conversation context** while exploring new areas
+                - **Helps discover connections** between different concepts
+                
+                ### **Example:**
+                If you're discussing "network security", topic exploration might suggest:
+                - 🔍 Firewall Configuration
+                - 🔍 VPN Setup
+                - 🔍 Access Control Lists
+                - 🔍 Threat Detection
+                - 🔍 Security Policies
+                - 🔍 Incident Response
+                
+                **💡 Pro Tip:** Use topic exploration to discover information you didn't know existed in your documents!
+                - ⚡ **Response Mode**: Stream responses in real-time for better user experience
                 """)
+
+            # Pipeline Verification Tab
+            with gr.Tab("🔍 Pipeline Verification"):
+                gr.Markdown("### 🔍 Pipeline Verification & Debugging")
+                gr.Markdown("""
+                **Debug and verify your RAG ingestion pipeline step-by-step:**
+                - 📋 **File Validation**: Check files before processing
+                - 🔧 **Content Extraction**: Test extraction without full ingestion
+                - 📝 **Chunking Methods**: Compare different chunking strategies
+                - ✅ **Full Verification**: Complete pipeline verification with detailed reports
+                - 📊 **Interactive Dashboard**: Visual pipeline monitoring
+                """)
+                
+                with gr.Tabs():
+                    # File Validation Tab
+                    with gr.Tab("📋 File Validation"):
+                        gr.Markdown("#### 📋 Validate Files Before Processing")
+                        
+                        with gr.Row():
+                            with gr.Column(scale=2):
+                                validate_file_input = gr.File(
+                                    label="📁 Select File to Validate",
+                                    file_types=[".txt", ".pdf", ".docx", ".doc", ".md", ".json", ".csv", ".xlsx", ".xls", ".xlsm", ".xlsb"],
+                                    type="filepath"
+                                )
+                                
+                                validate_file_btn = gr.Button("🔍 Validate File", variant="primary")
+                                
+                                with gr.Row():
+                                    with gr.Column():
+                                        validation_status = gr.Markdown(
+                                            label="Validation Status",
+                                            value="📋 Select a file and click 'Validate File' to check compatibility"
+                                        )
+                                    
+                                    with gr.Column():
+                                        validation_details = gr.Code(
+                                            label="Validation Details",
+                                            language="json",
+                                            value="{}",
+                                            lines=10
+                                        )
+                            
+                            with gr.Column(scale=1):
+                                gr.Markdown("#### 📋 Validation Checks")
+                                gr.Markdown("""
+                                **File validation includes:**
+                                - ✅ **File exists** and is accessible
+                                - 📏 **File size** within limits
+                                - 🔓 **File permissions** (readable)
+                                - 📄 **File extension** supported
+                                - 🔍 **File format** validation
+                                
+                                **Supported formats:**
+                                - 📄 Text: .txt, .md
+                                - 📊 Excel: .xlsx, .xls, .xlsm, .xlsb
+                                - 📝 Word: .docx, .doc
+                                - 📋 PDF: .pdf
+                                - 📊 Data: .csv, .json
+                                
+                                **Size limits:**
+                                - ⚠️ Warning: > 100MB
+                                - ❌ Error: > 500MB
+                                """)
+                    
+                    # Content Extraction Test Tab
+                    with gr.Tab("🔧 Content Extraction"):
+                        gr.Markdown("#### 🔧 Test Content Extraction")
+                        
+                        with gr.Row():
+                            with gr.Column(scale=2):
+                                extract_file_input = gr.File(
+                                    label="📁 Select File to Test Extraction",
+                                    file_types=[".txt", ".pdf", ".docx", ".doc", ".md", ".json", ".csv", ".xlsx", ".xls", ".xlsm", ".xlsb"],
+                                    type="filepath"
+                                )
+                                
+                                test_extraction_btn = gr.Button("🔧 Test Extraction", variant="primary")
+                                
+                                with gr.Row():
+                                    with gr.Column():
+                                        extraction_status = gr.Markdown(
+                                            label="Extraction Status",
+                                            value="🔧 Select a file and click 'Test Extraction' to analyze content"
+                                        )
+                                    
+                                    with gr.Column():
+                                        extraction_details = gr.Code(
+                                            label="Extraction Details",
+                                            language="json",
+                                            value="{}",
+                                            lines=10
+                                        )
+                            
+                            with gr.Column(scale=1):
+                                gr.Markdown("#### 🔧 Extraction Features")
+                                gr.Markdown("""
+                                **Content extraction tests:**
+                                - 📄 **Processor selection** (Excel, PDF, etc.)
+                                - 📊 **Sheet/page detection** 
+                                - 📝 **Text extraction** quality
+                                - 🖼️ **Embedded objects** (images, diagrams)
+                                - 📋 **Metadata extraction**
+                                - 🔍 **OCR processing** (if applicable)
+                                
+                                **For Excel files:**
+                                - 📊 Multiple sheets
+                                - 📈 Charts and graphs
+                                - 🖼️ Embedded Visio diagrams
+                                - 📋 Formulas and data
+                                
+                                **For PDF files:**
+                                - 📄 Text extraction
+                                - 🖼️ Image extraction
+                                - 📋 Metadata and structure
+                                """)
+                    
+                    # Chunking Test Tab
+                    with gr.Tab("📝 Chunking Test"):
+                        gr.Markdown("#### 📝 Test Different Chunking Methods")
+                        
+                        with gr.Row():
+                            with gr.Column(scale=2):
+                                chunking_text_input = gr.Textbox(
+                                    label="📝 Text to Chunk",
+                                    placeholder="Enter text to test chunking methods...",
+                                    lines=5,
+                                    max_lines=10
+                                )
+                                
+                                chunking_method_dropdown = gr.Dropdown(
+                                    label="🔧 Chunking Method",
+                                    choices=["semantic", "fixed", "recursive"],
+                                    value="semantic"
+                                )
+                                
+                                test_chunking_btn = gr.Button("📝 Test Chunking", variant="primary")
+                                
+                                with gr.Row():
+                                    with gr.Column():
+                                        chunking_status = gr.Markdown(
+                                            label="Chunking Status",
+                                            value="📝 Enter text and select a method to test chunking"
+                                        )
+                                    
+                                    with gr.Column():
+                                        chunking_details = gr.Code(
+                                            label="Chunking Details",
+                                            language="json",
+                                            value="{}",
+                                            lines=10
+                                        )
+                            
+                            with gr.Column(scale=1):
+                                gr.Markdown("#### 📝 Chunking Methods")
+                                gr.Markdown("""
+                                **Available methods:**
+                                - 🧠 **Semantic**: Context-aware chunking
+                                - 📏 **Fixed**: Fixed-size chunks
+                                - 🔄 **Recursive**: Hierarchical chunking
+                                
+                                **Chunking analysis:**
+                                - 📊 **Chunk count** and sizes
+                                - 📏 **Size distribution** 
+                                - 🔗 **Overlap detection**
+                                - 📋 **Metadata preservation**
+                                
+                                **Quality metrics:**
+                                - ⚖️ **Size consistency**
+                                - 🔗 **Overlap appropriateness**
+                                - 📝 **Content completeness**
+                                - 🎯 **Semantic coherence**
+                                """)
+                    
+                    # Full Verification Tab
+                    with gr.Tab("✅ Full Verification"):
+                        gr.Markdown("#### ✅ Complete Pipeline Verification")
+                        
+                        with gr.Row():
+                            with gr.Column(scale=2):
+                                verify_file_input = gr.File(
+                                    label="📁 Select File for Full Verification",
+                                    file_types=[".txt", ".pdf", ".docx", ".doc", ".md", ".json", ".csv", ".xlsx", ".xls", ".xlsm", ".xlsb"],
+                                    type="filepath"
+                                )
+                                
+                                verify_metadata_input = gr.Textbox(
+                                    label="📋 Metadata (JSON, Optional)",
+                                    placeholder='{"doc_type": "manual", "category": "technical"}',
+                                    lines=2
+                                )
+                                
+                                full_verify_btn = gr.Button("✅ Run Full Verification", variant="primary")
+                                
+                                with gr.Accordion("📊 Verification Results", open=True):
+                                    verification_status = gr.Markdown(
+                                        label="Verification Status",
+                                        value="✅ Select a file and click 'Run Full Verification' for complete pipeline analysis"
+                                    )
+                                    
+                                    verification_report = gr.Markdown(
+                                        label="Verification Report",
+                                        value="",
+                                        height=300
+                                    )
+                                
+                                with gr.Accordion("🔧 Raw Details", open=False):
+                                    verification_raw = gr.Code(
+                                        label="Raw Verification Data",
+                                        language="json",
+                                        value="{}",
+                                        lines=15
+                                    )
+                            
+                            with gr.Column(scale=1):
+                                gr.Markdown("#### ✅ Full Pipeline Verification")
+                                gr.Markdown("""
+                                **Complete verification includes:**
+                                - 📋 **File validation** (4 checks)
+                                - 🔧 **Content extraction** (6 checks)
+                                - 📝 **Text chunking** (5 checks)
+                                - 🔢 **Embedding generation** (4 checks)
+                                - 💾 **Vector storage** (3 checks)
+                                - 📊 **Metadata storage** (2 checks)
+                                
+                                **Verification stages:**
+                                1. 📋 File input validation
+                                2. 🔧 Processor selection
+                                3. 📄 Content extraction
+                                4. 📝 Text chunking
+                                5. 🔢 Embedding generation
+                                6. 💾 FAISS vector storage
+                                7. 📊 Metadata persistence
+                                
+                                **Output includes:**
+                                - ✅ **Pass/Fail** for each check
+                                - ⚠️ **Warnings** for potential issues
+                                - 📊 **Performance metrics**
+                                - 🔧 **Debug information**
+                                - 📋 **Detailed reports**
+                                """)
+                    
+                    # Pipeline Status Tab
+                    with gr.Tab("🔄 Pipeline Status"):
+                        gr.Markdown("#### 🔄 Real-time Pipeline Status")
+                        
+                        with gr.Row():
+                            with gr.Column(scale=2):
+                                pipeline_health_btn = gr.Button("🏥 Check Pipeline Health", variant="primary")
+                                pipeline_stages_btn = gr.Button("🔄 View Stage Status", variant="secondary")
+                                
+                                with gr.Row():
+                                    with gr.Column():
+                                        pipeline_health_status = gr.Markdown(
+                                            label="Pipeline Health",
+                                            value="🏥 Click 'Check Pipeline Health' to view system status"
+                                        )
+                                    
+                                    with gr.Column():
+                                        pipeline_stages_status = gr.Markdown(
+                                            label="Pipeline Stages",
+                                            value="🔄 Click 'View Stage Status' to see detailed stage information"
+                                        )
+                            
+                            with gr.Column(scale=1):
+                                gr.Markdown("#### 🔄 Pipeline Monitoring")
+                                gr.Markdown("""
+                                **Real-time monitoring:**
+                                - 🏥 **Health Status**: Overall system health
+                                - 🔄 **Stage Status**: Individual stage performance
+                                - 📊 **Success Rates**: Performance metrics
+                                - ⏱️ **Response Times**: Processing speeds
+                                - 📈 **Recent Activity**: Usage statistics
+                                
+                                **Pipeline Stages:**
+                                - 📁 File Validation
+                                - ⚙️ Processor Selection
+                                - 📄 Content Extraction
+                                - ✂️ Text Chunking
+                                - 🧮 Embedding Generation
+                                - 💾 Vector Storage
+                                - 🏷️ Metadata Storage
+                                """)
+                    
+                    # Session Management Tab
+                    with gr.Tab("📋 Session History"):
+                        gr.Markdown("#### 📋 Verification Session Management")
+                        
+                        with gr.Row():
+                            with gr.Column(scale=2):
+                                sessions_refresh_btn = gr.Button("🔄 Refresh Sessions", variant="primary")
+                                
+                                session_id_input = gr.Textbox(
+                                    label="🔍 Session ID (for details)",
+                                    placeholder="Enter session ID to view details...",
+                                    lines=1
+                                )
+                                
+                                session_details_btn = gr.Button("📋 Get Session Details", variant="secondary")
+                                
+                                with gr.Row():
+                                    with gr.Column():
+                                        sessions_display = gr.Markdown(
+                                            label="Recent Sessions",
+                                            value="📋 Click 'Refresh Sessions' to view recent verification sessions"
+                                        )
+                                    
+                                    with gr.Column():
+                                        session_details_display = gr.Markdown(
+                                            label="Session Details",
+                                            value="🔍 Enter a session ID and click 'Get Session Details' for detailed information"
+                                        )
+                                
+                                with gr.Accordion("🔧 Raw Session Data", open=False):
+                                    sessions_raw = gr.Code(
+                                        label="Raw Session Data",
+                                        language="json",
+                                        value="[]",
+                                        lines=10
+                                    )
+                                    
+                                    session_details_raw = gr.Code(
+                                        label="Raw Session Details",
+                                        language="json", 
+                                        value="{}",
+                                        lines=10
+                                    )
+                            
+                            with gr.Column(scale=1):
+                                gr.Markdown("#### 📋 Session Management")
+                                gr.Markdown("""
+                                **Session tracking:**
+                                - 📋 **Recent Sessions**: Last 10 verification sessions
+                                - ✅ **Success/Failure**: Status indicators
+                                - ⏱️ **Timestamps**: When sessions ran
+                                - 📄 **File Names**: Which files were processed
+                                - 🔍 **Detailed View**: Complete session information
+                                
+                                **Session details include:**
+                                - 📋 Session metadata
+                                - 🔍 Verification results for each stage
+                                - ⚠️ Warnings and errors
+                                - 📊 Performance metrics
+                                - 🔧 Debug information
+                                """)
+                    
+                    # Troubleshooting Tab
+                    with gr.Tab("⚠️ Troubleshooting"):
+                        gr.Markdown("#### ⚠️ Pipeline Troubleshooting Guide")
+                        
+                        with gr.Row():
+                            with gr.Column(scale=2):
+                                warnings_guide_btn = gr.Button("⚠️ View Common Warnings", variant="primary")
+                                
+                                warnings_guide_display = gr.Markdown(
+                                    label="Troubleshooting Guide",
+                                    value="⚠️ Click 'View Common Warnings' to see solutions for common pipeline issues"
+                                )
+                            
+                            with gr.Column(scale=1):
+                                gr.Markdown("#### ⚠️ Common Issues")
+                                gr.Markdown("""
+                                **Frequent warnings:**
+                                - 🔧 **Fallback Processor Used**
+                                - 📏 **File Size Warnings**
+                                - 🔍 **Content Extraction Issues**
+                                - 🧮 **Embedding Generation Problems**
+                                - 💾 **Vector Storage Errors**
+                                - 📊 **Metadata Storage Issues**
+                                
+                                **Quick fixes:**
+                                - 🔄 **Restart System**: Clears temporary issues
+                                - 🧹 **Clear Vector Store**: Fixes corrupted indices
+                                - 📋 **Check File Format**: Ensure supported types
+                                - 💽 **Check Disk Space**: Ensure sufficient storage
+                                """)
+
+                    # Interactive Dashboard Tab
+                    with gr.Tab("📊 Interactive Dashboard"):
+                        gr.Markdown("#### 📊 Visual Pipeline Monitoring")
+                        
+                        with gr.Row():
+                            with gr.Column():
+                                dashboard_url_display = gr.Markdown(
+                                    label="Dashboard URL",
+                                    value=f"🔗 **Dashboard URL**: {ui.get_verification_dashboard_url()}"
+                                )
+                                
+                                open_dashboard_btn = gr.Button("🚀 Open Interactive Dashboard", variant="primary")
+                                
+                                gr.Markdown("""
+                                #### 📊 Dashboard Features
+                                
+                                **Real-time monitoring:**
+                                - 🔄 **Live pipeline status** updates
+                                - 📊 **Visual stage indicators**
+                                - ⏱️ **Processing time** tracking
+                                - 📈 **Performance metrics**
+                                
+                                **Interactive debugging:**
+                                - 🔍 **Step-by-step** verification
+                                - 📋 **Detailed check results**
+                                - 🔧 **Debug console** with logs
+                                - 📊 **Chunk analysis** tools
+                                
+                                **Visual pipeline:**
+                                - 🟢 **Passed stages** (green)
+                                - 🔴 **Failed stages** (red)
+                                - 🟡 **Warning stages** (yellow)
+                                - ⚪ **Pending stages** (gray)
+                                
+                                **Export capabilities:**
+                                - 📄 **Verification reports** (JSON)
+                                - 📊 **Performance data**
+                                - 🔧 **Debug outputs**
+                                - 📋 **Chunk samples**
+                                """)
+                            
+                            with gr.Column():
+                                gr.HTML(f"""
+                                <div style="border: 2px solid #ddd; border-radius: 8px; padding: 20px; text-align: center; background: #f9f9f9;">
+                                    <h3>🚀 Interactive Pipeline Dashboard</h3>
+                                    <p>Click the button below to open the full interactive dashboard in a new tab:</p>
+                                    <a href="{ui.get_verification_dashboard_url()}" target="_blank" 
+                                       style="display: inline-block; background: #007bff; color: white; padding: 12px 24px; 
+                                              text-decoration: none; border-radius: 6px; font-weight: bold; margin: 10px;">
+                                        🔗 Open Dashboard
+                                    </a>
+                                    <p style="font-size: 0.9em; color: #666; margin-top: 15px;">
+                                        The dashboard provides real-time visualization of the pipeline verification process
+                                        with interactive debugging tools and detailed reports.
+                                    </p>
+                                </div>
+                                """)
+
+            # Vector Management Tab
+            with gr.Tab("🗄️ Vector Management"):
+                gr.Markdown("### 🗄️ Vector Index Management & Analysis")
+                gr.Markdown("""
+                **Comprehensive vector index management and analysis tools:**
+                - 📊 **Vector Browser**: Paginated browsing of all vectors with metadata
+                - 🔍 **Vector Details**: Deep inspection of individual vectors
+                - 🔎 **Advanced Search**: Sophisticated vector search with filtering
+                - 📈 **Index Statistics**: Complete vector store analytics
+                """)
+                
+                with gr.Tabs():
+                    # Vector Browser Tab
+                    with gr.Tab("📊 Vector Browser"):
+                        gr.Markdown("#### 📊 Browse Vector Index with Pagination")
+                        
+                        with gr.Row():
+                            with gr.Column(scale=2):
+                                with gr.Row():
+                                    vectors_page_input = gr.Number(
+                                        label="📄 Page Number",
+                                        value=1,
+                                        minimum=1,
+                                        step=1
+                                    )
+                                    
+                                    vectors_page_size_input = gr.Number(
+                                        label="📏 Page Size",
+                                        value=20,
+                                        minimum=5,
+                                        maximum=100,
+                                        step=5
+                                    )
+                                
+                                with gr.Row():
+                                    vectors_include_content_checkbox = gr.Checkbox(
+                                        label="📝 Include Content Preview",
+                                        value=False
+                                    )
+                                
+                                with gr.Row():
+                                    vectors_doc_filter_input = gr.Textbox(
+                                        label="🔍 Document Filter",
+                                        placeholder="Filter by document path (e.g., 'manual', 'guide')...",
+                                        lines=1
+                                    )
+                                    
+                                    vectors_source_filter_input = gr.Textbox(
+                                        label="🏷️ Source Type Filter",
+                                        placeholder="Filter by source type (e.g., 'pdf', 'txt')...",
+                                        lines=1
+                                    )
+                                
+                                vectors_browse_btn = gr.Button("📊 Browse Vectors", variant="primary")
+                                
+                                vectors_display = gr.Markdown(
+                                    label="Vector Index Browser",
+                                    value="📊 Click 'Browse Vectors' to start exploring your vector index...",
+                                    height=600
+                                )
+                            
+                            with gr.Column(scale=1):
+                                gr.Markdown("#### 📊 Vector Browser Guide")
+                                gr.Markdown("""
+                                **What you'll see:**
+                                - 🆔 **Vector IDs**: Unique identifiers
+                                - 📄 **Document paths**: Source document info
+                                - 🏷️ **Source types**: File format types
+                                - 📊 **Chunk indices**: Position in document
+                                - ⏰ **Timestamps**: When vectors were added
+                                - 📝 **Content preview**: (if enabled)
+                                
+                                **Navigation:**
+                                - ⬅️ **Previous/Next**: Navigate between pages
+                                - 📏 **Page size**: Control how many vectors per page
+                                - 🔍 **Filters**: Narrow down results
+                                
+                                **Filtering options:**
+                                - 📁 **Document filter**: Find vectors from specific documents
+                                - 🏷️ **Source filter**: Filter by file type or source
+                                - 📝 **Content preview**: Toggle content display
+                                
+                                **Performance tips:**
+                                - 🚀 **Smaller page sizes** load faster
+                                - 🔍 **Use filters** to find specific content
+                                - 📝 **Disable content preview** for speed
+                                """)
+                    
+                    # Vector Details Tab
+                    with gr.Tab("🔍 Vector Details"):
+                        gr.Markdown("#### 🔍 Detailed Vector Inspection")
+                        
+                        with gr.Row():
+                            with gr.Column(scale=2):
+                                vector_id_input = gr.Textbox(
+                                    label="🆔 Vector ID",
+                                    placeholder="Enter vector ID for detailed inspection...",
+                                    lines=1
+                                )
+                                
+                                vector_include_embedding_checkbox = gr.Checkbox(
+                                    label="🧮 Include Embedding Statistics",
+                                    value=True
+                                )
+                                
+                                vector_details_btn = gr.Button("🔍 Get Vector Details", variant="primary")
+                                
+                                vector_details_display = gr.Markdown(
+                                    label="Vector Details",
+                                    value="🔍 Enter a vector ID and click 'Get Vector Details' for comprehensive analysis...",
+                                    height=600
+                                )
+                            
+                            with gr.Column(scale=1):
+                                gr.Markdown("#### 🔍 Vector Details Guide")
+                                gr.Markdown("""
+                                **Detailed information includes:**
+                                - 📋 **Basic info**: ID, document, source type
+                                - 📝 **Full content**: Complete text content
+                                - 🧮 **Embedding stats**: Vector mathematics
+                                - 🔗 **Similar vectors**: Related content
+                                
+                                **Embedding statistics:**
+                                - 📐 **Dimension**: Vector size (e.g., 1024)
+                                - 📊 **Norm**: Vector magnitude
+                                - 📈📉 **Min/Max values**: Range of components
+                                - 📊 **Mean value**: Average component value
+                                
+                                **Similar vectors:**
+                                - 🔗 **Top 5 similar**: Most related vectors
+                                - 📊 **Similarity scores**: Cosine similarity
+                                - 📝 **Content previews**: Quick content view
+                                
+                                **Use cases:**
+                                - 🔍 **Debug search results**: Why certain content appears
+                                - 📊 **Quality assessment**: Check embedding quality
+                                - 🔗 **Content relationships**: Find related documents
+                                - 🧮 **Vector analysis**: Mathematical properties
+                                """)
+                    
+                    # Advanced Vector Search Tab
+                    with gr.Tab("🔎 Advanced Search"):
+                        gr.Markdown("#### 🔎 Advanced Vector Search & Analysis")
+                        
+                        with gr.Row():
+                            with gr.Column(scale=2):
+                                search_query_input = gr.Textbox(
+                                    label="🔍 Search Query",
+                                    placeholder="Enter your search query...",
+                                    lines=2
+                                )
+                                
+                                with gr.Row():
+                                    search_k_input = gr.Number(
+                                        label="🔢 Max Results (k)",
+                                        value=10,
+                                        minimum=1,
+                                        maximum=50,
+                                        step=1
+                                    )
+                                    
+                                    search_threshold_input = gr.Number(
+                                        label="📊 Similarity Threshold",
+                                        value=0.0,
+                                        minimum=0.0,
+                                        maximum=1.0,
+                                        step=0.05
+                                    )
+                                
+                                search_doc_filter_input = gr.Textbox(
+                                    label="📁 Document Filter (Optional)",
+                                    placeholder="Filter by document path...",
+                                    lines=1
+                                )
+                                
+                                vector_search_btn = gr.Button("🔎 Search Vectors", variant="primary")
+                                
+                                vector_search_display = gr.Markdown(
+                                    label="Advanced Search Results",
+                                    value="🔎 Enter a search query and click 'Search Vectors' for detailed analysis...",
+                                    height=600
+                                )
+                            
+                            with gr.Column(scale=1):
+                                gr.Markdown("#### 🔎 Advanced Search Guide")
+                                gr.Markdown("""
+                                **Search parameters:**
+                                - 🔍 **Query**: Natural language search
+                                - 🔢 **Max results (k)**: Limit number of results
+                                - 📊 **Threshold**: Minimum similarity score
+                                - 📁 **Document filter**: Restrict to specific docs
+                                
+                                **Search statistics:**
+                                - 📄 **Total results**: Number found
+                                - 📈 **Average similarity**: Mean score
+                                - 🔝 **Max/Min similarity**: Range of scores
+                                - ✅ **Above threshold**: Filtered results
+                                
+                                **Result details:**
+                                - 📊 **Similarity scores**: Relevance ranking
+                                - 🆔 **Vector IDs**: For detailed inspection
+                                - 📄 **Document info**: Source and type
+                                - 📝 **Content previews**: Snippet of content
+                                
+                                **Optimization tips:**
+                                - 🎯 **Specific queries** get better results
+                                - 📊 **Higher thresholds** filter noise
+                                - 📁 **Document filters** narrow scope
+                                - 🔢 **Adjust k** for more/fewer results
+                                """)
+
+            # Performance Monitoring Tab
+            with gr.Tab("📈 Performance Monitor"):
+                gr.Markdown("### 📈 Query Performance Monitoring & System Analytics")
+                gr.Markdown("""
+                **Comprehensive performance monitoring and system analytics:**
+                - 📊 **Query Analytics**: Detailed performance metrics and trends
+                - 🧪 **Performance Testing**: Benchmark query performance
+                - 🖥️ **System Monitor**: Real-time resource usage and health
+                - 📈 **Optimization Insights**: Performance tuning recommendations
+                """)
+                
+                with gr.Tabs():
+                    # Query Performance Analytics Tab
+                    with gr.Tab("📊 Query Analytics"):
+                        gr.Markdown("#### 📊 Query Performance Analytics & Trends")
+                        
+                        with gr.Row():
+                            with gr.Column(scale=2):
+                                with gr.Row():
+                                    perf_time_range_input = gr.Number(
+                                        label="⏰ Time Range (Hours)",
+                                        value=24,
+                                        minimum=1,
+                                        maximum=168,
+                                        step=1
+                                    )
+                                    
+                                    perf_limit_input = gr.Number(
+                                        label="📊 Max Records",
+                                        value=50,
+                                        minimum=10,
+                                        maximum=500,
+                                        step=10
+                                    )
+                                
+                                query_analytics_btn = gr.Button("📊 Get Performance Analytics", variant="primary")
+                                
+                                query_analytics_display = gr.Markdown(
+                                    label="Query Performance Analytics",
+                                    value="📊 Click 'Get Performance Analytics' to view comprehensive query performance data...",
+                                    height=600
+                                )
+                            
+                            with gr.Column(scale=1):
+                                gr.Markdown("#### 📊 Performance Analytics Guide")
+                                gr.Markdown("""
+                                **Performance statistics:**
+                                - 📝 **Total queries**: Volume metrics
+                                - ⏱️ **Response times**: Speed analysis
+                                - ✅ **Success rates**: Reliability metrics
+                                - 🔧 **Component breakdown**: Bottleneck identification
+                                
+                                **Component analysis:**
+                                - 🧠 **Embedding time**: Text-to-vector conversion
+                                - 🔍 **Search time**: Vector similarity search
+                                - 🤖 **LLM time**: Response generation
+                                
+                                **Query complexity:**
+                                - 📏 **Query length**: Character count analysis
+                                - 📄 **Sources returned**: Result size metrics
+                                - 📈 **Complexity trends**: Pattern analysis
+                                
+                                **Error analysis:**
+                                - ❌ **Error types**: Categorized failures
+                                - 📊 **Error rates**: Failure frequency
+                                - 🔍 **Error patterns**: Root cause analysis
+                                
+                                **Recent queries:**
+                                - 📋 **Latest 10 queries**: Recent activity
+                                - ⏱️ **Individual timings**: Per-query breakdown
+                                - 📄 **Source counts**: Results per query
+                                """)
+                    
+                    # Performance Testing Tab
+                    with gr.Tab("🧪 Performance Testing"):
+                        gr.Markdown("#### 🧪 Query Performance Testing & Benchmarking")
+                        
+                        with gr.Row():
+                            with gr.Column(scale=2):
+                                test_query_input = gr.Textbox(
+                                    label="🎯 Test Query",
+                                    placeholder="Enter a query to benchmark performance...",
+                                    lines=2
+                                )
+                                
+                                test_max_results_input = gr.Number(
+                                    label="📊 Max Results",
+                                    value=3,
+                                    minimum=1,
+                                    maximum=10,
+                                    step=1
+                                )
+                                
+                                performance_test_btn = gr.Button("🧪 Run Performance Test", variant="primary")
+                                
+                                performance_test_display = gr.Markdown(
+                                    label="Performance Test Results",
+                                    value="🧪 Enter a test query and click 'Run Performance Test' for detailed timing analysis...",
+                                    height=600
+                                )
+                            
+                            with gr.Column(scale=1):
+                                gr.Markdown("#### 🧪 Performance Testing Guide")
+                                gr.Markdown("""
+                                **Test metrics:**
+                                - 🚀 **Total time**: End-to-end performance
+                                - 🔧 **Component breakdown**: Individual timings
+                                - 📊 **Percentage distribution**: Time allocation
+                                - 📄 **Results summary**: Output analysis
+                                
+                                **Component timings:**
+                                - 🧠 **Embedding**: Query vectorization time
+                                - 🔍 **Search**: Vector similarity search time
+                                - 🤖 **LLM**: Response generation time
+                                
+                                **Performance analysis:**
+                                - ✅ **Excellent**: < 1 second
+                                - 🟢 **Good**: 1-2 seconds
+                                - 🟡 **Fair**: 2-5 seconds
+                                - 🔴 **Slow**: > 5 seconds
+                                
+                                **Optimization tips:**
+                                - 💡 **LLM bottleneck**: Use shorter context
+                                - 💡 **Search bottleneck**: Optimize index
+                                - 💡 **Embedding bottleneck**: Consider caching
+                                
+                                **Use cases:**
+                                - 🎯 **Baseline testing**: Establish performance baselines
+                                - 🔍 **Bottleneck identification**: Find slow components
+                                - 📊 **Before/after comparison**: Measure improvements
+                                - 🧪 **Query optimization**: Test different approaches
+                                """)
+                    
+                    # System Performance Tab
+                    with gr.Tab("🖥️ System Monitor"):
+                        gr.Markdown("#### 🖥️ Real-time System Performance Monitor")
+                        
+                        with gr.Row():
+                            with gr.Column(scale=2):
+                                system_monitor_btn = gr.Button("🖥️ Get System Performance", variant="primary")
+                                
+                                system_performance_display = gr.Markdown(
+                                    label="System Performance Monitor",
+                                    value="🖥️ Click 'Get System Performance' to view real-time system metrics...",
+                                    height=600
+                                )
+                            
+                            with gr.Column(scale=1):
+                                gr.Markdown("#### 🖥️ System Monitor Guide")
+                                gr.Markdown("""
+                                **System resources:**
+                                - 💾 **Memory usage**: RAM consumption
+                                - 🖥️ **CPU usage**: Processor load
+                                - 💽 **Disk usage**: Storage consumption
+                                - 🔧 **Process resources**: RAG system specific
+                                
+                                **Vector store health:**
+                                - 📊 **Total vectors**: Index size
+                                - ✅ **Active vectors**: Searchable content
+                                - 🗑️ **Deleted vectors**: Soft-deleted content
+                                - 📐 **Vector dimension**: Embedding size
+                                
+                                **Query performance:**
+                                - 📝 **Total logged queries**: Activity volume
+                                - ⏱️ **Recent avg response**: Performance trend
+                                
+                                **Health indicators:**
+                                - ✅ **Healthy**: Green - optimal performance
+                                - 🟡 **Warning**: Yellow - attention needed
+                                - 🔴 **Critical**: Red - immediate action required
+                                
+                                **Monitoring use cases:**
+                                - 📊 **Capacity planning**: Resource forecasting
+                                - 🔍 **Performance troubleshooting**: Issue diagnosis
+                                - 📈 **Trend analysis**: Usage patterns
+                                - ⚠️ **Alert management**: Proactive monitoring
+                                """)
 
         # Event Handlers
         
@@ -3430,12 +6071,73 @@ def create_fixed_interface():
             outputs=[operation_result, document_registry_display, delete_doc_path_input]
         )
         
-        # Query testing
-        test_query_btn.click(
-            fn=ui.test_query,
+        # Simple query testing function
+        def simple_test_query(query_input, max_results):
+            print(f"DEBUG: simple_test_query called with: '{query_input}', max_results: {max_results}")
+            
+            if not query_input or not str(query_input).strip():
+                return "❌ Please enter a query to test", "", ""
+            
+            return ui.test_query(str(query_input).strip(), max_results)
+        
+        # Method 1: Direct textbox
+        test_direct_btn.click(
+            fn=simple_test_query,
             inputs=[test_query_input, max_results_slider],
             outputs=[query_answer, query_sources, query_lifecycle_analysis]
         )
+        
+        test_query_input.submit(
+            fn=simple_test_query,
+            inputs=[test_query_input, max_results_slider],
+            outputs=[query_answer, query_sources, query_lifecycle_analysis]
+        )
+        
+        # Method 2: Dropdown selection
+        def test_dropdown_query(selected_query, max_results):
+            print(f"DEBUG: test_dropdown_query called with: '{selected_query}', max_results: {max_results}")
+            
+            if not selected_query:
+                return "❌ Please select a query from the dropdown", "", ""
+            
+            return ui.test_query(selected_query, max_results)
+        
+        test_dropdown_btn.click(
+            fn=test_dropdown_query,
+            inputs=[query_dropdown, max_results_slider],
+            outputs=[query_answer, query_sources, query_lifecycle_analysis]
+        )
+        
+        # Method 3: Text area
+        test_textarea_btn.click(
+            fn=simple_test_query,
+            inputs=[test_textarea, max_results_slider],
+            outputs=[query_answer, query_sources, query_lifecycle_analysis]
+        )
+        
+        test_textarea.submit(
+            fn=simple_test_query,
+            inputs=[test_textarea, max_results_slider],
+            outputs=[query_answer, query_sources, query_lifecycle_analysis]
+        )
+        
+        # Hardcoded test query function
+        def test_hardcoded_query(max_results):
+            print(f"DEBUG: test_hardcoded_query called with max_results = {max_results}")
+            hardcoded_query = "What is the company policy?"
+            print(f"DEBUG: Using hardcoded query: '{hardcoded_query}'")
+            return ui.test_query(hardcoded_query, max_results)
+        
+
+        
+        # Hardcoded test button
+        test_hardcoded_btn.click(
+            fn=test_hardcoded_query,
+            inputs=[max_results_slider],
+            outputs=[query_answer, query_sources, query_lifecycle_analysis]
+        )
+        
+
         
         # Feedback event handlers
         def submit_helpful_feedback(feedback_text):
@@ -3465,16 +6167,13 @@ def create_fixed_interface():
         
         # Folder monitoring event handlers
         def start_monitoring_and_refresh(folder_path):
-            # Validate input before proceeding
-            if not folder_path or not folder_path.strip():
-                return (
-                    "❌ **Please enter a folder path**\n\nExample: `C:\\Documents\\MyFolder` or `/home/user/documents`",
-                    ui.get_monitoring_status(),
-                    ui._format_document_registry(),
-                    gr.update(choices=ui.get_document_paths(), value=None)
-                )
+            # If folder path is provided, add it to monitoring
+            if folder_path and folder_path.strip():
+                result = ui.add_folder_to_monitoring(folder_path)
+            else:
+                # If no folder path, just start the monitoring service
+                result = ui.start_monitoring_service()
             
-            result = ui.start_folder_monitoring(folder_path)
             status = ui.get_monitoring_status()
             registry = ui._format_document_registry()
             dropdown_choices = ui.get_document_paths()
@@ -3509,6 +6208,63 @@ def create_fixed_interface():
             
             return status, registry, gr.update(choices=safe_choices, value=None)
         
+        def force_scan_and_refresh():
+            """Force an immediate scan of monitored folders"""
+            try:
+                response = requests.post(f"{ui.api_url}/folder-monitor/scan", timeout=30)
+                if response.status_code == 200:
+                    data = response.json()
+                    if data.get('success'):
+                        result = f"🔍 **Forced Scan Completed**\n\n"
+                        result += f"📄 **Changes Detected:** {data.get('changes_detected', 0)}\n"
+                        result += f"📊 **Files Tracked:** {data.get('files_tracked', 0)}\n"
+                        result += f"📅 **Scan Time:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+                        result += f"\n💡 **Note:** Check file status for detailed processing results."
+                    else:
+                        result = f"❌ **Scan Failed:** {data.get('error', 'Unknown error')}"
+                else:
+                    result = f"❌ **HTTP Error:** {response.status_code}"
+            except Exception as e:
+                result = f"❌ **Error:** {str(e)}"
+            
+            # Also refresh status
+            status = ui.get_monitoring_status()
+            file_status = ui.get_detailed_file_status()
+            registry = ui._format_document_registry()
+            dropdown_choices = ui.get_document_paths()
+            
+            # Ensure dropdown_choices is a proper list of strings
+            if not isinstance(dropdown_choices, list):
+                dropdown_choices = ["(No documents uploaded yet)"]
+            
+            safe_choices = [str(choice) for choice in dropdown_choices if choice is not None]
+            if not safe_choices:
+                safe_choices = ["(No documents uploaded yet)"]
+            
+            return result, status, file_status, registry, gr.update(choices=safe_choices, value=None)
+        
+        def refresh_file_status():
+            """Refresh detailed file status"""
+            file_status = ui.get_detailed_file_status()
+            return file_status
+        
+        def refresh_all_monitoring_info():
+            """Refresh all monitoring information for auto-refresh"""
+            status = ui.get_monitoring_status()
+            file_status = ui.get_detailed_file_status()
+            registry = ui._format_document_registry()
+            dropdown_choices = ui.get_document_paths()
+            
+            # Ensure dropdown_choices is a proper list of strings
+            if not isinstance(dropdown_choices, list):
+                dropdown_choices = ["(No documents uploaded yet)"]
+            
+            safe_choices = [str(choice) for choice in dropdown_choices if choice is not None]
+            if not safe_choices:
+                safe_choices = ["(No documents uploaded yet)"]
+            
+            return status, file_status, registry, gr.update(choices=safe_choices, value=None)
+        
         start_monitor_btn.click(
             fn=start_monitoring_and_refresh,
             inputs=[monitor_folder_input],
@@ -3523,6 +6279,36 @@ def create_fixed_interface():
         status_refresh_btn.click(
             fn=refresh_monitoring_status,
             outputs=[monitor_status_display, document_registry_display, delete_doc_path_input]
+        )
+        
+        force_scan_btn.click(
+            fn=force_scan_and_refresh,
+            outputs=[monitor_result, monitor_status_display, file_status_display, document_registry_display, delete_doc_path_input]
+        )
+        
+        refresh_files_btn.click(
+            fn=refresh_file_status,
+            outputs=[file_status_display]
+        )
+        
+        # Auto-refresh functionality - DISABLED BY DEFAULT to prevent infinite loops
+        auto_refresh_timer = gr.Timer(30, active=False)  # 30 second timer, DISABLED by default
+        
+        def toggle_auto_refresh(enabled):
+            if enabled:
+                return gr.update(active=True)
+            else:
+                return gr.update(active=False)
+        
+        auto_refresh_checkbox.change(
+            fn=toggle_auto_refresh,
+            inputs=[auto_refresh_checkbox],
+            outputs=[auto_refresh_timer]
+        )
+        
+        auto_refresh_timer.tick(
+            fn=refresh_all_monitoring_info,
+            outputs=[monitor_status_display, file_status_display, document_registry_display, delete_doc_path_input]
         )
         
         # Individual folder management event handlers
@@ -3583,6 +6369,66 @@ def create_fixed_interface():
         refresh_folders_btn.click(
             fn=refresh_folders_and_display,
             outputs=[monitored_folders_display, folder_selector, remove_folder_btn, remove_folder_result]
+        )
+        
+        def sync_config_and_refresh():
+            """Sync configuration with backend and refresh displays"""
+            sync_result = ui.sync_config_with_backend()
+            status = ui.get_monitoring_status()
+            file_status = ui.get_detailed_file_status()
+            display_text, folder_list = ui.get_monitored_folders()
+            
+            return (
+                sync_result,
+                status,
+                file_status,
+                display_text,
+                gr.update(choices=folder_list, value=None, visible=len(folder_list) > 0),
+                gr.update(visible=len(folder_list) > 0)
+            )
+        
+        sync_config_btn.click(
+            fn=sync_config_and_refresh,
+            outputs=[monitor_result, monitor_status_display, file_status_display, monitored_folders_display, folder_selector, remove_folder_btn]
+        )
+        
+        def show_file_type_details():
+            """Show detailed file type information"""
+            detailed_info = ui.get_supported_file_types_info()
+            return (
+                detailed_info,
+                gr.update(visible=False),  # Hide show button
+                gr.update(visible=True)    # Show hide button
+            )
+        
+        def hide_file_type_details():
+            """Hide detailed file type information and show summary"""
+            summary_info = """
+            - 📄 **Text files**: .txt, .md
+            - 📊 **Data files**: .json, .csv
+            - 📖 **PDF Documents**: .pdf
+            - 📝 **Word Documents**: .docx, .doc
+            - 📊 **Excel files**: .xlsx, .xls, .xlsm, .xlsb
+            - 🎯 **PowerPoint**: .pptx, .ppt
+            - 🖼️ **Images**: .jpg, .jpeg, .png, .gif, .bmp, .tiff, .tif, .webp, .svg
+            - 📐 **Visio Diagrams**: .vsdx, .vsd, .vsdm, .vstx, .vst, .vstm
+            
+            *Click "Show Details" for comprehensive file type information*
+            """
+            return (
+                summary_info,
+                gr.update(visible=True),   # Show show button
+                gr.update(visible=False)   # Hide hide button
+            )
+        
+        show_file_types_btn.click(
+            fn=show_file_type_details,
+            outputs=[file_types_display, show_file_types_btn, hide_file_types_btn]
+        )
+        
+        hide_file_types_btn.click(
+            fn=hide_file_type_details,
+            outputs=[file_types_display, show_file_types_btn, hide_file_types_btn]
         )
         
         remove_folder_btn.click(
@@ -3653,6 +6499,26 @@ def create_fixed_interface():
             outputs=[diagnostics_result, document_registry_display, delete_doc_path_input]
         )
         
+        def discover_docs_and_refresh():
+            discovery_result = ui.discover_documents_via_search()
+            registry = ui._format_document_registry()
+            dropdown_choices = ui.get_document_paths()
+            
+            # Ensure dropdown_choices is a proper list of strings
+            if not isinstance(dropdown_choices, list):
+                dropdown_choices = ["(No documents uploaded yet)"]
+            
+            safe_choices = [str(choice) for choice in dropdown_choices if choice is not None]
+            if not safe_choices:
+                safe_choices = ["(No documents uploaded yet)"]
+            
+            return discovery_result, registry, gr.update(choices=safe_choices, value=None)
+        
+        discover_docs_btn.click(
+            fn=discover_docs_and_refresh,
+            outputs=[diagnostics_result, document_registry_display, delete_doc_path_input]
+        )
+        
         # Document overview event handlers
         def refresh_documents_and_display():
             try:
@@ -3720,11 +6586,35 @@ def create_fixed_interface():
             outputs=heartbeat_output
         )
         
-        # Enhanced conversation event handlers
-        def start_conversation_and_update():
-            """Start a new conversation and update UI"""
-            history, thread_id, status = ui.start_new_conversation()
-            conversation_status_text = ui.get_conversation_status(thread_id)
+        # Enhanced conversation event handlers for ChatGPT-style interface
+        def auto_start_conversation():
+            """Auto-start a new conversation when page loads"""
+            # Add protection against multiple calls during initialization
+            import time
+            current_time = time.time()
+            if hasattr(auto_start_conversation, '_last_call'):
+                time_diff = current_time - auto_start_conversation._last_call
+                if time_diff < 2.0:  # Prevent calls more frequent than 2 seconds
+                    print(f"DEBUG: auto_start_conversation throttled (last call {time_diff:.2f}s ago)")
+                    return [], "", "Initialization in progress...", gr.update(), "", "", "", "", {"throttled": True}, gr.update(visible=False), gr.update(visible=False), gr.update(visible=False), *([gr.update(value="", visible=False)] * 10)
+            auto_start_conversation._last_call = current_time
+            
+            print("DEBUG: Starting auto_start_conversation...")
+            history, thread_id, status = ui.auto_start_new_conversation()
+            print(f"DEBUG: New conversation - Thread ID: {thread_id}, Status: {status}")
+            
+            # Load conversation history for dropdown
+            print("DEBUG: Loading conversation history...")
+            history_choices = ui.get_conversation_history()
+            print(f"DEBUG: Got {len(history_choices)} history choices")
+            
+            if history_choices:
+                formatted_choices = [f"{title} ({tid[:8]})" for tid, title in history_choices]
+                history_dropdown_update = gr.update(choices=formatted_choices, value=None)
+                print(f"DEBUG: Formatted history choices: {formatted_choices}")
+            else:
+                history_dropdown_update = gr.update(choices=["(No previous conversations)"], value=None)
+                print("DEBUG: No history found, showing empty message")
             
             # Clear all suggestion elements
             suggestion_updates = [
@@ -3734,14 +6624,84 @@ def create_fixed_interface():
                 gr.update(value="", visible=False) for _ in range(6)  # topic chips
             ]
             
+            print("DEBUG: Returning auto_start_conversation results")
             return (
-                history, thread_id, status, conversation_status_text,
-                "💡 Start a conversation to see personalized hints and suggestions!",
-                "", "", "",  # Clear insights, entity exploration, technical terms
-                {}  # Clear debug info
+                history, thread_id, status,
+                history_dropdown_update,  # Populate history dropdown
+                "", "", "", "",  # Clear insights, interaction hints, entity exploration, technical terms
+                {"conversation_started": True}, # Clear debug info with valid dict
+                gr.update(visible=False),  # Hide suggestions group
+                gr.update(visible=False),  # Hide topics group
+                gr.update(visible=False),  # Hide insights container
             ) + tuple(suggestion_updates) + tuple(topic_updates)
         
-        def send_message_and_update(message, thread_id, history, use_streaming=True):
+        def start_new_chat():
+            """Start a new conversation manually"""
+            history, thread_id, status = ui.start_new_conversation()
+            
+            # Refresh history dropdown
+            history_choices = ui.get_conversation_history()
+            formatted_choices = [f"{title} ({thread_id[:8]})" for thread_id, title in history_choices]
+            
+            # Clear all suggestion elements
+            suggestion_updates = [
+                gr.update(value="", visible=False) for _ in range(4)
+            ]
+            topic_updates = [
+                gr.update(value="", visible=False) for _ in range(6)
+            ]
+            
+            return (
+                history, thread_id, status,
+                gr.update(choices=formatted_choices, value=None),  # Update history dropdown
+                "", "", "", "",  # Clear insights, interaction hints, entity exploration, technical terms
+                {"new_chat_started": True},  # Clear debug info with valid dict
+                gr.update(visible=False),  # Hide suggestions group
+                gr.update(visible=False),  # Hide topics group
+                gr.update(visible=False),  # Hide insights container
+            ) + tuple(suggestion_updates) + tuple(topic_updates)
+        
+        def refresh_chat_history():
+            """Refresh the chat history dropdown"""
+            print("DEBUG: Refreshing chat history...")
+            history_choices = ui.get_conversation_history()
+            print(f"DEBUG: Got {len(history_choices)} history choices")
+            
+            if history_choices:
+                formatted_choices = [f"{title} ({thread_id[:8]})" for thread_id, title in history_choices]
+                print(f"DEBUG: Formatted choices: {formatted_choices}")
+                return gr.update(choices=formatted_choices, value=None)
+            else:
+                print("DEBUG: No history choices found, returning empty dropdown")
+                return gr.update(choices=["(No previous conversations)"], value=None)
+        
+        def load_selected_chat(selected_chat):
+            """Load a selected chat from history"""
+            if not selected_chat:
+                return [], "", "No chat selected", gr.update()
+            
+            # Extract thread_id from formatted string
+            thread_id = selected_chat.split("(")[-1].rstrip(")")
+            history, loaded_thread_id, status = ui.load_conversation_thread(thread_id)
+            
+            return history, loaded_thread_id, status, gr.update()
+        
+        def delete_selected_chat(selected_chat):
+            """Delete a selected chat from history"""
+            if not selected_chat:
+                return "No chat selected", gr.update()
+            
+            # Extract thread_id from formatted string
+            thread_id = selected_chat.split("(")[-1].rstrip(")")
+            delete_status = ui.delete_conversation_thread(thread_id)
+            
+            # Refresh history dropdown
+            history_choices = ui.get_conversation_history()
+            formatted_choices = [f"{title} ({thread_id[:8]})" for thread_id, title in history_choices]
+            
+            return delete_status, gr.update(choices=formatted_choices, value=None)
+        
+        def send_message_and_update(message, thread_id, history, use_streaming=True, show_suggestions=True, show_topics=True, show_insights=False):
             """Send message and update conversation with enhanced suggestions (streaming or regular)"""
             try:
                 if use_streaming:
@@ -3765,13 +6725,13 @@ def create_fixed_interface():
                 message_cleared = ""
                 status = f"❌ Conversation API error: {str(e)}"
             
-            conversation_status_text = ui.get_conversation_status(thread_id)
-            
             # Update suggestion buttons with error handling
             suggestions = enhanced_data.get('suggestions', [])
             suggestion_updates = []
+            suggestions_visible = show_suggestions and len(suggestions) > 0
+            
             for i in range(4):
-                if i < len(suggestions):
+                if i < len(suggestions) and show_suggestions:
                     suggestion = suggestions[i]
                     if isinstance(suggestion, dict):
                         icon = suggestion.get('icon', '💬')
@@ -3862,13 +6822,27 @@ def create_fixed_interface():
                     else:
                         terms_text += f"• {term}\n"
             
+            # Control visibility based on settings
+            suggestions_group_visible = show_suggestions and suggestions_visible
+            topics_group_visible = show_topics and len(topics) > 0
+            insights_container_visible = show_insights and (insights_text or entities_text or terms_text or hints_text)
+            
+            # Ensure enhanced_data is always a valid dict for JSON component
+            if not isinstance(enhanced_data, dict):
+                enhanced_data = {"debug_info": str(enhanced_data), "message_processed": True}
+            
             return (
-                message_cleared, updated_history, status, conversation_status_text,
-                hints_text,
-                insights_text if insights_text else "",
-                entities_text if entities_text else "",
-                terms_text if terms_text else "",
-                enhanced_data  # Debug info
+                message_cleared,  # Clear message input
+                updated_history,  # Updated chat history
+                status,  # Status message
+                enhanced_data,  # Debug info (always a valid dict)
+                gr.update(visible=suggestions_group_visible),  # Suggestions group visibility
+                gr.update(visible=topics_group_visible),  # Topics group visibility
+                gr.update(visible=insights_container_visible),  # Insights container visibility
+                gr.update(value=insights_text, visible=bool(insights_text and show_insights)),  # Conversation insights
+                gr.update(value=hints_text, visible=bool(hints_text and show_insights)),  # Interaction hints
+                gr.update(value=entities_text, visible=bool(entities_text and show_insights)),  # Entity exploration
+                gr.update(value=terms_text, visible=bool(terms_text and show_insights)),  # Technical terms
             ) + tuple(suggestion_updates) + tuple(topic_updates)
         
         def end_conversation_and_update(thread_id):
@@ -3887,13 +6861,13 @@ def create_fixed_interface():
                 end_history, cleared_thread, status, "No active conversation",
                 "💡 Start a new conversation to see suggestions!",
                 "", "", "",  # Clear insights, entities, terms
-                {}  # Clear debug info
+                {"conversation_ended": True}  # Clear debug info with valid dict
             ) + tuple(suggestion_updates) + tuple(topic_updates)
         
         def handle_suggestion_click(suggestion_text, thread_id, history):
             """Handle suggestion button click"""
             if not suggestion_text or not suggestion_text.strip():
-                return "", history, "No suggestion selected", {}
+                return "", history, "No suggestion selected", {"status": "no_suggestion"}
             
             # Extract the actual question from the button text (remove emoji and handle truncation)
             clean_question = suggestion_text.split(" ", 1)[1] if " " in suggestion_text else suggestion_text
@@ -3908,20 +6882,20 @@ def create_fixed_interface():
                 message_cleared = full_response[0]
                 updated_history = full_response[1] 
                 status = full_response[2]
-                debug_data = full_response[8] if len(full_response) > 8 else {}
+                debug_data = full_response[3] if len(full_response) > 3 else {"suggestion_processed": True}
                 
-                # Ensure debug_data is JSON serializable
-                if not isinstance(debug_data, (dict, list, str, int, float, bool, type(None))):
-                    debug_data = str(debug_data)
+                # Ensure debug_data is always a valid dict
+                if not isinstance(debug_data, dict):
+                    debug_data = {"debug_info": str(debug_data), "suggestion_processed": True}
                 
                 return message_cleared, updated_history, status, debug_data
             except Exception as e:
-                return "", history, f"Error: {str(e)}", {"error": str(e)}
+                return "", history, f"Error: {str(e)}", {"error": str(e), "suggestion_failed": True}
         
         def handle_topic_click(topic_text, thread_id, history):
             """Handle topic chip click"""
             if not topic_text or not topic_text.strip():
-                return "", history, "No topic selected", {}
+                return "", history, "No topic selected", {"status": "no_topic"}
             
             # Extract topic name and create a question
             topic_name = topic_text.replace("🔍 ", "")
@@ -3934,15 +6908,15 @@ def create_fixed_interface():
                 message_cleared = full_response[0]
                 updated_history = full_response[1]
                 status = full_response[2] 
-                debug_data = full_response[8] if len(full_response) > 8 else {}
+                debug_data = full_response[3] if len(full_response) > 3 else {"topic_processed": True}
                 
-                # Ensure debug_data is JSON serializable
-                if not isinstance(debug_data, (dict, list, str, int, float, bool, type(None))):
-                    debug_data = str(debug_data)
+                # Ensure debug_data is always a valid dict
+                if not isinstance(debug_data, dict):
+                    debug_data = {"debug_info": str(debug_data), "topic_processed": True}
                 
                 return message_cleared, updated_history, status, debug_data
             except Exception as e:
-                return "", history, f"Error: {str(e)}", {"error": str(e)}
+                return "", history, f"Error: {str(e)}", {"error": str(e), "topic_failed": True}
         
         def clear_suggestions():
             """Clear all suggestions and reset UI"""
@@ -3956,55 +6930,158 @@ def create_fixed_interface():
             return (
                 "💡 Suggestions cleared. Continue the conversation for new suggestions!",
                 "", "", "",  # Clear insights, entities, terms
-                {}  # Clear debug info
+                {"suggestions_cleared": True}  # Clear debug info with valid dict
             ) + tuple(suggestion_updates) + tuple(topic_updates)
+
+        # Pipeline Verification Event Handlers
+        def validate_file_and_update(file_path):
+            """Validate file for verification"""
+            if not file_path:
+                return "📋 Please select a file first", "{}"
+            
+            status, details = ui.validate_file_for_verification(file_path)
+            return status, details
+
+        def test_extraction_and_update(file_path):
+            """Test content extraction"""
+            if not file_path:
+                return "🔧 Please select a file first", "{}"
+            
+            status, details = ui.test_content_extraction(file_path)
+            return status, details
+
+        def test_chunking_and_update(text, method):
+            """Test chunking methods"""
+            if not text or not text.strip():
+                return "📝 Please enter text to chunk", "{}"
+            
+            status, details = ui.test_chunking_methods(text, method)
+            return status, details
+
+        def full_verification_and_update(file_path, metadata_str):
+            """Run full pipeline verification"""
+            if not file_path:
+                return "✅ Please select a file first", "", "{}"
+            
+            # Parse metadata if provided
+            metadata = None
+            if metadata_str and metadata_str.strip():
+                try:
+                    import json
+                    metadata = json.loads(metadata_str)
+                except json.JSONDecodeError:
+                    return "❌ Invalid JSON in metadata field", "", "{}"
+            
+            status, report, raw_details = ui.ingest_with_verification(file_path, metadata)
+            return status, report, raw_details
+
+        def open_dashboard():
+            """Open verification dashboard in new tab"""
+            import webbrowser
+            try:
+                webbrowser.open(ui.get_verification_dashboard_url())
+                return "🚀 Dashboard opened in new tab"
+            except Exception as e:
+                return f"❌ Error opening dashboard: {str(e)}"
+
+        def refresh_pipeline_health():
+            """Refresh pipeline health status"""
+            return ui.get_pipeline_health_status()
+
+        def refresh_pipeline_stages():
+            """Refresh pipeline stages status"""
+            return ui.get_pipeline_stage_status()
+
+        def refresh_sessions():
+            """Refresh verification sessions"""
+            sessions_display, sessions_raw = ui.get_verification_sessions()
+            return sessions_display, sessions_raw
+
+        def get_session_details_and_update(session_id):
+            """Get session details"""
+            if not session_id or not session_id.strip():
+                return "🔍 Please enter a session ID", "{}"
+            
+            details_display, details_raw = ui.get_session_details(session_id.strip())
+            return details_display, details_raw
+
+        def show_warnings_guide():
+            """Show pipeline warnings and troubleshooting guide"""
+            return ui.explain_pipeline_warnings()
         
-        # Enhanced conversation tab event handlers
-        start_conversation_btn.click(
-            fn=start_conversation_and_update,
+        # ChatGPT-style conversation event handlers
+        
+
+        
+        # New chat button
+        new_chat_btn.click(
+            fn=start_new_chat,
             outputs=[
-                chatbot, thread_id_display, conversation_status, conversation_status,
-                interaction_hints, conversation_insights, entity_exploration, technical_terms,
-                debug_info,
+                chatbot, thread_id_display, conversation_status, chat_history_dropdown,
+                conversation_insights, interaction_hints, entity_exploration, technical_terms,
+                debug_info, suggestions_group, topics_group, insights_container,
                 suggestion_btn_1, suggestion_btn_2, suggestion_btn_3, suggestion_btn_4,
                 topic_chip_1, topic_chip_2, topic_chip_3, topic_chip_4, topic_chip_5, topic_chip_6
             ]
         )
         
+        # Chat history management
+        refresh_history_btn.click(
+            fn=refresh_chat_history,
+            outputs=[chat_history_dropdown]
+        )
+        
+        load_chat_btn.click(
+            fn=load_selected_chat,
+            inputs=[chat_history_dropdown],
+            outputs=[chatbot, thread_id_display, conversation_status, chat_history_dropdown]
+        )
+        
+        delete_chat_btn.click(
+            fn=delete_selected_chat,
+            inputs=[chat_history_dropdown],
+            outputs=[conversation_status, chat_history_dropdown]
+        )
+        
+        # Message sending with enhanced controls
+        def send_with_controls(message, thread_id, history, streaming, show_suggestions, show_topics, show_insights):
+            return send_message_and_update(message, thread_id, history, streaming, show_suggestions, show_topics, show_insights)
+        
         send_button.click(
-            fn=send_message_and_update,
-            inputs=[message_input, thread_id_display, chatbot, streaming_toggle],
+            fn=send_with_controls,
+            inputs=[message_input, thread_id_display, chatbot, streaming_toggle, show_suggestions_toggle, show_topics_toggle, show_insights_toggle],
             outputs=[
-                message_input, chatbot, conversation_status, conversation_status,
-                interaction_hints, conversation_insights, entity_exploration, technical_terms,
-                debug_info,
+                message_input, chatbot, conversation_status, debug_info,
+                suggestions_group, topics_group, insights_container,
+                conversation_insights, interaction_hints, entity_exploration, technical_terms,
                 suggestion_btn_1, suggestion_btn_2, suggestion_btn_3, suggestion_btn_4,
                 topic_chip_1, topic_chip_2, topic_chip_3, topic_chip_4, topic_chip_5, topic_chip_6
             ]
         )
         
         message_input.submit(
-            fn=send_message_and_update,
-            inputs=[message_input, thread_id_display, chatbot, streaming_toggle],
+            fn=send_with_controls,
+            inputs=[message_input, thread_id_display, chatbot, streaming_toggle, show_suggestions_toggle, show_topics_toggle, show_insights_toggle],
             outputs=[
-                message_input, chatbot, conversation_status, conversation_status,
-                interaction_hints, conversation_insights, entity_exploration, technical_terms,
-                debug_info,
+                message_input, chatbot, conversation_status, debug_info,
+                suggestions_group, topics_group, insights_container,
+                conversation_insights, interaction_hints, entity_exploration, technical_terms,
                 suggestion_btn_1, suggestion_btn_2, suggestion_btn_3, suggestion_btn_4,
                 topic_chip_1, topic_chip_2, topic_chip_3, topic_chip_4, topic_chip_5, topic_chip_6
             ]
         )
         
-        end_conversation_btn.click(
-            fn=end_conversation_and_update,
-            inputs=[thread_id_display],
-            outputs=[
-                chatbot, thread_id_display, conversation_status, conversation_status,
-                interaction_hints, conversation_insights, entity_exploration, technical_terms,
-                debug_info,
-                suggestion_btn_1, suggestion_btn_2, suggestion_btn_3, suggestion_btn_4,
-                topic_chip_1, topic_chip_2, topic_chip_3, topic_chip_4, topic_chip_5, topic_chip_6
-            ]
+        # Checkbox controls for visibility
+        show_insights_toggle.change(
+            fn=lambda show: gr.update(visible=show),
+            inputs=[show_insights_toggle],
+            outputs=[insights_container]
+        )
+        
+        show_insights_toggle.change(
+            fn=lambda show: gr.update(visible=show),
+            inputs=[show_insights_toggle],
+            outputs=[debug_accordion]
         )
         
         clear_suggestions_btn.click(
@@ -4037,10 +7114,123 @@ def create_fixed_interface():
                 ]
             )
 
-        # Initialize connection status on load
+        # Pipeline Verification Tab Event Handlers
+        validate_file_btn.click(
+            fn=validate_file_and_update,
+            inputs=[validate_file_input],
+            outputs=[validation_status, validation_details]
+        )
+        
+        test_extraction_btn.click(
+            fn=test_extraction_and_update,
+            inputs=[extract_file_input],
+            outputs=[extraction_status, extraction_details]
+        )
+        
+        test_chunking_btn.click(
+            fn=test_chunking_and_update,
+            inputs=[chunking_text_input, chunking_method_dropdown],
+            outputs=[chunking_status, chunking_details]
+        )
+        
+        full_verify_btn.click(
+            fn=full_verification_and_update,
+            inputs=[verify_file_input, verify_metadata_input],
+            outputs=[verification_status, verification_report, verification_raw]
+        )
+        
+        open_dashboard_btn.click(
+            fn=open_dashboard,
+            outputs=[]
+        )
+        
+        # Enhanced Pipeline Verification Event Handlers
+        pipeline_health_btn.click(
+            fn=refresh_pipeline_health,
+            outputs=[pipeline_health_status]
+        )
+        
+        pipeline_stages_btn.click(
+            fn=refresh_pipeline_stages,
+            outputs=[pipeline_stages_status]
+        )
+        
+        sessions_refresh_btn.click(
+            fn=refresh_sessions,
+            outputs=[sessions_display, sessions_raw]
+        )
+        
+        session_details_btn.click(
+            fn=get_session_details_and_update,
+            inputs=[session_id_input],
+            outputs=[session_details_display, session_details_raw]
+        )
+        
+        warnings_guide_btn.click(
+            fn=show_warnings_guide,
+            outputs=[warnings_guide_display]
+        )
+
+        # Vector Management Tab Event Handlers
+        vectors_browse_btn.click(
+            fn=ui.get_vectors_paginated,
+            inputs=[vectors_page_input, vectors_page_size_input, vectors_include_content_checkbox, 
+                    vectors_doc_filter_input, vectors_source_filter_input],
+            outputs=[vectors_display]
+        )
+        
+        vector_details_btn.click(
+            fn=ui.get_vector_details,
+            inputs=[vector_id_input, vector_include_embedding_checkbox],
+            outputs=[vector_details_display]
+        )
+        
+        vector_search_btn.click(
+            fn=ui.search_vectors_advanced,
+            inputs=[search_query_input, search_k_input, search_threshold_input, search_doc_filter_input],
+            outputs=[vector_search_display]
+        )
+
+        # Performance Monitoring Tab Event Handlers
+        query_analytics_btn.click(
+            fn=ui.get_query_performance_metrics,
+            inputs=[perf_time_range_input, perf_limit_input],
+            outputs=[query_analytics_display]
+        )
+        
+        performance_test_btn.click(
+            fn=ui.test_query_performance,
+            inputs=[test_query_input, test_max_results_input],
+            outputs=[performance_test_display]
+        )
+        
+        system_monitor_btn.click(
+            fn=ui.get_system_performance,
+            outputs=[system_performance_display]
+        )
+
+        # Initialize connection status and auto-start conversation on load
+        def initialize_interface():
+            """Initialize the interface with connection check and auto-start conversation"""
+            # Check connection
+            connection_result = ui.check_api_connection()
+            
+            # Auto-start conversation
+            conversation_results = auto_start_conversation()
+            
+            # Return connection status + conversation initialization results
+            return (connection_result,) + conversation_results
+        
         interface.load(
-            fn=ui.check_api_connection,
-            outputs=[connection_status]
+            fn=initialize_interface,
+            outputs=[
+                connection_status,
+                chatbot, thread_id_display, conversation_status, chat_history_dropdown,
+                conversation_insights, interaction_hints, entity_exploration, technical_terms,
+                debug_info, suggestions_group, topics_group, insights_container,
+                suggestion_btn_1, suggestion_btn_2, suggestion_btn_3, suggestion_btn_4,
+                topic_chip_1, topic_chip_2, topic_chip_3, topic_chip_4, topic_chip_5, topic_chip_6
+            ]
         )
     
     return interface

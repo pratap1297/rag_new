@@ -57,6 +57,18 @@ def main():
             logging.warning(f"Folder monitor initialization failed: {e}")
             logging.info("System will continue without folder monitoring")
         
+        # Initialize enhanced folder monitor
+        enhanced_folder_monitor = None
+        try:
+            from src.monitoring.enhanced_folder_monitor import initialize_enhanced_folder_monitor
+            logging.info("Initializing enhanced folder monitor...")
+            config_manager = container.get('config_manager')
+            enhanced_folder_monitor = initialize_enhanced_folder_monitor(container, config_manager)
+            logging.info("✅ Enhanced folder monitor initialized successfully")
+        except Exception as e:
+            logging.warning(f"Enhanced folder monitor initialization failed: {e}")
+            logging.info("System will continue without enhanced folder monitoring")
+        
         # Update the global monitors in the API module
         try:
             import src.api.main as api_main
@@ -67,7 +79,7 @@ def main():
         
         # Register folder monitor with API module
         try:
-            import src.monitoring.folder_monitor as folder_monitor_module
+            from src.monitoring import folder_monitor as folder_monitor_module
             folder_monitor_module.folder_monitor = folder_monitor
             logging.info("✅ Folder monitor registered with API")
         except Exception as e:
@@ -76,7 +88,7 @@ def main():
         # Create API app
         from src.api.main import create_api_app
         logging.info("Creating FastAPI application...")
-        api_app = create_api_app(container, monitoring, heartbeat_monitor)
+        api_app = create_api_app(container, monitoring, heartbeat_monitor, folder_monitor, enhanced_folder_monitor)
         logging.info("FastAPI application created successfully")
         
         # Start continuous health monitoring (if enabled in config)

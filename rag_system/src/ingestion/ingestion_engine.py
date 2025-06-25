@@ -9,8 +9,14 @@ from typing import Dict, List, Any, Optional
 from datetime import datetime
 
 from ..core.error_handling import IngestionError, FileProcessingError
+from ..core.unified_error_handling import (
+    ErrorCode, ErrorInfo, ErrorContext, Result, 
+    with_error_handling, IngestionErrorHandler
+)
+from ..core.metadata_manager import get_metadata_manager, MetadataSchema
 from .processors.base_processor import ProcessorRegistry
 from .processors.excel_processor import ExcelProcessor
+from .processors import create_processor_registry
 
 class IngestionEngine:
     """Main document ingestion engine"""
@@ -22,39 +28,139 @@ class IngestionEngine:
         self.metadata_store = metadata_store
         self.config_manager = config_manager
         self.config = config_manager.get_config()
-        # Initialize processor registry
-        self.processor_registry = ProcessorRegistry()
-        # Register Excel processor if Azure AI is configured
-        self._register_excel_processor()
-        logging.info("Ingestion engine initialized")
+        
+        # Initialize metadata manager
+        self.metadata_manager = get_metadata_manager()
+        
+        # Initialize processor registry with all available processors
+        try:
+            # Create processor config from ingestion config
+            processor_config = self.config.ingestion.__dict__.copy()
+            logging.info(f"DEBUG: Created processor config with keys: {list(processor_config.keys())}")
+            
+            # Add Azure AI config if available
+            try:
+                azure_config = self.config_manager.get_config('azure_ai')
+                if azure_config:
+                    processor_config['azure_ai'] = azure_config.__dict__
+                    logging.info("DEBUG: Added Azure AI config to processor config")
+            except Exception as e:
+                logging.debug(f"Azure AI config not available: {e}")
+            
+            # Create registry with all processors
+            logging.info("DEBUG: About to call create_processor_registry")
+            self.processor_registry = create_processor_registry(processor_config)
+            logging.info(f"Processor registry initialized with {len(self.processor_registry.list_processors())} processors: {self.processor_registry.list_processors()}")
+            
+        except Exception as e:
+            logging.error(f"Failed to create processor registry: {e}")
+            logging.error(f"DEBUG: Exception type: {type(e)}")
+            import traceback
+            logging.error(f"DEBUG: Full traceback: {traceback.format_exc()}")
+            # Fallback to empty registry
+            self.processor_registry = ProcessorRegistry()
+            # Still register Excel processor manually as fallback
+            self._register_excel_processor()
+        
+        logging.info("Ingestion engine initialized with managed metadata")
     
     def _register_excel_processor(self):
-        """Register Excel processor with Azure AI support if configured"""
+        """Register Excel processor with robust Azure AI support if configured"""
         try:
-            azure_config = self.config_manager.get_config('azure_ai')
-            if azure_config and (azure_config.computer_vision_endpoint and azure_config.computer_vision_key):
-                from ..integrations.azure_ai.azure_client import AzureAIClient
-                azure_client = AzureAIClient({
-                    'computer_vision_endpoint': azure_config.computer_vision_endpoint,
-                    'computer_vision_key': azure_config.computer_vision_key,
-                    'document_intelligence_endpoint': azure_config.document_intelligence_endpoint,
-                    'document_intelligence_key': azure_config.document_intelligence_key,
-                    'max_image_size_mb': azure_config.max_image_size_mb,
-                    'ocr_language': azure_config.ocr_language,
-                    'enable_handwriting': azure_config.enable_handwriting
-                })
-                excel_processor = ExcelProcessor(
-                    config=self.config.ingestion.__dict__,
-                    azure_client=azure_client
-                )
-                self.processor_registry.register(excel_processor)
-                logging.info("Excel processor registered with Azure AI support")
+            # Try to get Azure AI configuration
+            azure_config = None
+            try:
+                azure_config = self.config_manager.get_config('azure_ai')
+            except Exception as e:
+                logging.debug(f"Azure AI config not available: {e}")
+            
+            # Use robust Excel processor with comprehensive error handling
+            from .processors.robust_excel_processor import RobustExcelProcessor
+            from ..integrations.azure_ai.config_validator import AzureAIConfigValidator
+            from ..integrations.azure_ai.robust_azure_client import RobustAzureAIClient
+            
+            # Prepare processor config
+            processor_config = self.config.ingestion.__dict__.copy()
+            
+            # Add Azure AI config if available
+            if azure_config:
+                try:
+                    # Validate and fix Azure configuration
+                    fixed_azure_config, issues = AzureAIConfigValidator.validate_and_fix(azure_config.__dict__)
+                    
+                    if issues:
+                        logging.info(f"Azure AI configuration fixes applied: {len(issues)} issues")
+                        for issue in issues[:5]:  # Log first 5 issues
+                            logging.debug(f"Config fix: {issue}")
+                    
+                    # Check configuration status
+                    config_status = AzureAIConfigValidator.get_configuration_status(fixed_azure_config)
+                    
+                    if config_status['overall']['configuration_complete']:
+                        # Initialize robust Azure client
+                        try:
+                            azure_client = RobustAzureAIClient(fixed_azure_config)
+                            
+                            # Check client health
+                            if azure_client.is_healthy():
+                                processor_config['azure_ai'] = fixed_azure_config
+                                excel_processor = RobustExcelProcessor(
+                                    config=processor_config,
+                                    azure_client=azure_client
+                                )
+                                available_services = azure_client.get_available_services()
+                                logging.info(f"Excel processor registered with Azure AI support: {available_services}")
+                            else:
+                                # Client not healthy, use without Azure AI
+                                excel_processor = RobustExcelProcessor(config=processor_config)
+                                service_status = azure_client.get_service_status()
+                                logging.warning(f"Azure AI services not healthy, using fallback processing. Status: {service_status['overall_health']}")
+                        
+                        except Exception as e:
+                            # Azure client initialization failed
+                            excel_processor = RobustExcelProcessor(config=processor_config)
+                            logging.error(f"Failed to initialize Azure AI client: {e}")
+                    else:
+                        # Configuration incomplete
+                        excel_processor = RobustExcelProcessor(config=processor_config)
+                        missing_services = [s for s, status in config_status['services'].items() if not status['configured']]
+                        logging.info(f"Azure AI configuration incomplete (missing: {missing_services}), using fallback processing")
+                
+                except Exception as e:
+                    # Configuration validation failed
+                    excel_processor = RobustExcelProcessor(config=processor_config)
+                    logging.error(f"Azure AI configuration validation failed: {e}")
             else:
+                # No Azure AI configuration
+                excel_processor = RobustExcelProcessor(config=processor_config)
+                logging.info("No Azure AI configuration found, using local processing only")
+            
+            # Register the processor
+            self.processor_registry.register(excel_processor)
+            
+            # Log processor capabilities
+            processor_info = excel_processor.get_processor_info()
+            logging.info(f"Excel processor registered: {processor_info['capabilities']}")
+            
+        except ImportError as e:
+            # Fallback to basic Excel processor if robust version not available
+            logging.warning(f"Robust Excel processor not available: {e}")
+            try:
                 excel_processor = ExcelProcessor(config=self.config.ingestion.__dict__)
                 self.processor_registry.register(excel_processor)
-                logging.info("Excel processor registered without Azure AI support")
+                logging.info("Basic Excel processor registered as fallback")
+            except Exception as fallback_e:
+                logging.error(f"Failed to register any Excel processor: {fallback_e}")
+        
         except Exception as e:
-            logging.warning(f"Failed to register Excel processor: {e}")
+            logging.error(f"Failed to register Excel processor: {e}")
+            # Try basic fallback
+            try:
+                excel_processor = ExcelProcessor(config=self.config.ingestion.__dict__)
+                self.processor_registry.register(excel_processor)
+                logging.info("Basic Excel processor registered after error")
+            except Exception as fallback_e:
+                logging.error(f"All Excel processor registration attempts failed: {fallback_e}")
     
     def _generate_doc_id(self, metadata: Dict[str, Any]) -> str:
         """Generate a proper document ID based on available metadata"""
@@ -115,24 +221,20 @@ class IngestionEngine:
                     'file_path': str(file_path)
                 }
             
-            # Prepare metadata - merge custom metadata properly
+            # Prepare base file metadata
             file_metadata = {
                 'file_path': str(file_path),
-                'file_name': file_path.name,
+                'filename': file_path.name,  # Use 'filename' instead of 'file_name'
                 'file_size': file_path.stat().st_size,
                 'file_type': file_path.suffix,
                 'source_type': 'file',
                 'ingested_at': datetime.now().isoformat(),
+                'processor': 'ingestion_engine',
                 'is_update': old_vectors_deleted > 0,
-                'replaced_vectors': old_vectors_deleted,
-                **(metadata or {})
+                'replaced_vectors': old_vectors_deleted
             }
             
-            # If doc_path is provided in metadata, use it as the primary identifier
-            if metadata and 'doc_path' in metadata:
-                file_metadata['doc_path'] = metadata['doc_path']
-            
-            # Chunk the text
+            # Chunk the text with base metadata
             chunks = self.chunker.chunk_text(text_content, file_metadata)
             
             if not chunks:
@@ -146,39 +248,67 @@ class IngestionEngine:
             chunk_texts = [chunk['text'] for chunk in chunks]
             embeddings = self.embedder.embed_texts(chunk_texts)
             
-            # Prepare chunk metadata for FAISS
+            # Prepare chunk metadata using metadata manager
             chunk_metadata_list = []
             
-            # Generate a proper doc_id based on available metadata
-            doc_id = self._generate_doc_id(file_metadata)
-            
-            for chunk, embedding in zip(chunks, embeddings):
-                chunk_meta = {
-                    'text': chunk['text'],
-                    'chunk_index': chunk['chunk_index'],
-                    'doc_id': doc_id,  # Explicitly set doc_id
-                    **chunk['metadata'],  # Flatten the chunk metadata
-                    **file_metadata  # Include file-level metadata (including doc_path)
-                }
-                chunk_metadata_list.append(chunk_meta)
+            for i, (chunk, embedding) in enumerate(zip(chunks, embeddings)):
+                # Merge metadata using the metadata manager to prevent double flattening
+                try:
+                    merged_metadata = self.metadata_manager.merge_metadata(
+                        file_metadata,           # Base file metadata
+                        metadata or {},          # Custom metadata from user
+                        chunk.get('metadata', {}),  # Chunk-specific metadata
+                        {                        # Final chunk data
+                            'text': chunk['text'],
+                            'chunk_index': i,
+                            'total_chunks': len(chunks),
+                            'chunk_size': len(chunk['text']),
+                            'chunking_method': getattr(self.chunker, '__class__', {}).get('__name__', 'unknown'),
+                            'embedding_model': getattr(self.embedder, 'model_name', 'unknown')
+                        }
+                    )
+                    
+                    # Prepare for storage
+                    storage_metadata = self.metadata_manager.prepare_for_storage(merged_metadata)
+                    chunk_metadata_list.append(storage_metadata)
+                    
+                except Exception as e:
+                    logging.error(f"Failed to merge metadata for chunk {i}: {e}")
+                    # Fallback to simple metadata
+                    fallback_meta = {
+                        'text': chunk['text'],
+                        'chunk_index': i,
+                        'doc_id': file_metadata.get('filename', 'unknown'),
+                        'filename': file_metadata.get('filename'),
+                        'file_path': str(file_path),
+                        'source_type': 'file'
+                    }
+                    chunk_metadata_list.append(fallback_meta)
             
             # Add to FAISS store
             vector_ids = self.faiss_store.add_vectors(embeddings, chunk_metadata_list)
             
             # Store file metadata
-            file_id = self.metadata_store.add_file_metadata(str(file_path), {
+            final_file_metadata = {
                 **file_metadata,
                 'chunk_count': len(chunks),
-                'vector_ids': vector_ids
-            })
+                'vector_ids': vector_ids,
+                'doc_id': chunk_metadata_list[0].get('doc_id', 'unknown') if chunk_metadata_list else 'unknown'
+            }
+            
+            file_id = self.metadata_store.add_file_metadata(str(file_path), final_file_metadata)
             
             logging.info(f"Successfully ingested file: {file_path} ({len(chunks)} chunks)")
             if old_vectors_deleted > 0:
                 logging.info(f"Replaced {old_vectors_deleted} old vectors for updated file")
             
+            # Get doc_id for response
+            doc_id = chunk_metadata_list[0].get('doc_id', 'unknown') if chunk_metadata_list else 'unknown'
+            
             return {
                 'status': 'success',
                 'file_id': file_id,
+                'doc_id': doc_id,
                 'file_path': str(file_path),
                 'chunks_created': len(chunks),
                 'vectors_stored': len(vector_ids),
@@ -189,6 +319,91 @@ class IngestionEngine:
         except Exception as e:
             logging.error(f"Failed to ingest file {file_path}: {e}")
             raise IngestionError(f"Failed to ingest file: {e}", file_path=str(file_path))
+    
+    def ingest_text(self, text: str, metadata: Dict[str, Any] = None) -> Dict[str, Any]:
+        """Ingest raw text content with managed metadata"""
+        try:
+            if not text.strip():
+                return {
+                    'status': 'skipped',
+                    'reason': 'no_content'
+                }
+            
+            # Prepare base metadata
+            base_metadata = {
+                'source_type': 'text',
+                'ingested_at': datetime.now().isoformat(),
+                'processor': 'ingestion_engine_text',
+                'text_length': len(text)
+            }
+            
+            # Chunk the text
+            chunks = self.chunker.chunk_text(text, base_metadata)
+            
+            if not chunks:
+                return {
+                    'status': 'skipped',
+                    'reason': 'no_chunks'
+                }
+            
+            # Generate embeddings
+            chunk_texts = [chunk['text'] for chunk in chunks]
+            embeddings = self.embedder.embed_texts(chunk_texts)
+            
+            # Prepare chunk metadata using metadata manager
+            chunk_metadata_list = []
+            
+            for i, (chunk, embedding) in enumerate(zip(chunks, embeddings)):
+                try:
+                    # Merge metadata using the metadata manager
+                    merged_metadata = self.metadata_manager.merge_metadata(
+                        base_metadata,           # Base metadata
+                        metadata or {},          # Custom metadata from user
+                        chunk.get('metadata', {}),  # Chunk-specific metadata
+                        {                        # Final chunk data
+                            'text': chunk['text'],
+                            'chunk_index': i,
+                            'total_chunks': len(chunks),
+                            'chunk_size': len(chunk['text']),
+                            'chunking_method': getattr(self.chunker, '__class__', {}).get('__name__', 'unknown'),
+                            'embedding_model': getattr(self.embedder, 'model_name', 'unknown')
+                        }
+                    )
+                    
+                    # Prepare for storage
+                    storage_metadata = self.metadata_manager.prepare_for_storage(merged_metadata)
+                    chunk_metadata_list.append(storage_metadata)
+                    
+                except Exception as e:
+                    logging.error(f"Failed to merge metadata for text chunk {i}: {e}")
+                    # Fallback to simple metadata
+                    fallback_meta = {
+                        'text': chunk['text'],
+                        'chunk_index': i,
+                        'doc_id': metadata.get('title', 'text_document') if metadata else 'text_document',
+                        'source_type': 'text'
+                    }
+                    chunk_metadata_list.append(fallback_meta)
+            
+            # Add to FAISS store
+            vector_ids = self.faiss_store.add_vectors(embeddings, chunk_metadata_list)
+            
+            # Get doc_id for response
+            doc_id = chunk_metadata_list[0].get('doc_id', 'text_document') if chunk_metadata_list else 'text_document'
+            
+            logging.info(f"Successfully ingested text content ({len(chunks)} chunks)")
+            
+            return {
+                'status': 'success',
+                'doc_id': doc_id,
+                'chunks_created': len(chunks),
+                'vectors_stored': len(vector_ids),
+                'text_length': len(text)
+            }
+            
+        except Exception as e:
+            logging.error(f"Failed to ingest text: {e}")
+            raise IngestionError(f"Failed to ingest text: {e}")
     
     def _handle_existing_file(self, file_path: str) -> int:
         """Handle existing file by deleting old vectors"""

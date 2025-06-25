@@ -305,12 +305,12 @@ def create_gradio_interface():
     }
     """
     
-    with gr.Blocks(css=css, title="RAG System Test Interface") as interface:
+    with gr.Blocks(css=css, title="AI-Force Intelligent Support Agent") as interface:
         
         gr.Markdown("""
-        # 🤖 RAG System Test Interface
+        # 🤖 AI-Force Intelligent Support Agent
         
-        Welcome to the RAG (Retrieval-Augmented Generation) System testing interface. 
+        Welcome to the AI-Force Intelligent Support Agent testing interface. 
         Use the tabs below to test different aspects of the system.
         """)
         

@@ -126,7 +126,7 @@ def create_gradio_app(container) -> Optional[object]:
         
         # Create Gradio interface
         with gr.Blocks(
-            title="RAG System with Conversational AI",
+            title="AI Force Intelligent Support Agent",
             theme=gr.themes.Soft(),
             css="""
             .conversation-container { max-height: 500px; overflow-y: auto; }
@@ -135,7 +135,7 @@ def create_gradio_app(container) -> Optional[object]:
             .assistant-message { background-color: #f3e5f5; text-align: left; }
             """
         ) as app:
-            gr.Markdown("# 🤖 RAG System with Conversational AI")
+            gr.Markdown("# 🤖 AI Force Intelligent Support Agent")
             gr.Markdown("Enhanced RAG system with LangGraph-powered conversations")
             
             with gr.Tab("💬 Conversation Chat"):

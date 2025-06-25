@@ -125,11 +125,14 @@ def create_metadata_store(container: DependencyContainer):
     try:
         from ..storage.persistent_metadata_store import PersistentJSONMetadataStore
     except ImportError:
-        # Fallback for when running as script
-        import sys
-        from pathlib import Path
-        sys.path.insert(0, str(Path(__file__).parent.parent))
-        from storage.persistent_metadata_store import PersistentJSONMetadataStore
+        try:
+            from rag_system.src.storage.persistent_metadata_store import PersistentJSONMetadataStore
+        except ImportError:
+            # Last fallback for when running as script
+            import sys
+            from pathlib import Path
+            sys.path.insert(0, str(Path(__file__).parent.parent))
+            from storage.persistent_metadata_store import PersistentJSONMetadataStore
     # Use default path to avoid circular dependency with config_manager
     return PersistentJSONMetadataStore("data/metadata")
 
@@ -173,13 +176,17 @@ def create_faiss_store(container: DependencyContainer):
         from ..storage.faiss_store import FAISSStore
         from .constants import get_embedding_dimension
     except ImportError:
-        # Fallback for when running as script
-        import sys
-        from pathlib import Path
-        sys.path.insert(0, str(Path(__file__).parent.parent))
-        from storage.faiss_store import FAISSStore
-        sys.path.insert(0, str(Path(__file__).parent))
-        from constants import get_embedding_dimension
+        try:
+            from rag_system.src.storage.faiss_store import FAISSStore
+            from rag_system.src.core.constants import get_embedding_dimension
+        except ImportError:
+            # Last fallback for when running as script
+            import sys
+            from pathlib import Path
+            sys.path.insert(0, str(Path(__file__).parent.parent))
+            from storage.faiss_store import FAISSStore
+            sys.path.insert(0, str(Path(__file__).parent))
+            from constants import get_embedding_dimension
     
     # Get config to determine embedding dimension
     config_manager = container.get('config_manager')
@@ -205,11 +212,14 @@ def create_embedder(container: DependencyContainer):
     try:
         from ..ingestion.embedder import Embedder
     except ImportError:
-        # Fallback for when running as script
-        import sys
-        from pathlib import Path
-        sys.path.insert(0, str(Path(__file__).parent.parent))
-        from ingestion.embedder import Embedder
+        try:
+            from rag_system.src.ingestion.embedder import Embedder
+        except ImportError:
+            # Last fallback for when running as script
+            import sys
+            from pathlib import Path
+            sys.path.insert(0, str(Path(__file__).parent.parent))
+            from ingestion.embedder import Embedder
     import os
     
     # Get config to use correct embedding provider and model
@@ -235,33 +245,44 @@ def create_embedder(container: DependencyContainer):
     return embedder
 
 def create_chunker(container: DependencyContainer):
-    """Factory for Chunker"""
+    """Factory for Chunker with memory-efficient semantic chunking"""
     try:
         from ..ingestion.chunker import Chunker
     except ImportError:
-        # Fallback for when running as script
-        import sys
-        from pathlib import Path
-        sys.path.insert(0, str(Path(__file__).parent.parent))
-        from ingestion.chunker import Chunker
+        try:
+            from rag_system.src.ingestion.chunker import Chunker
+        except ImportError:
+            # Last fallback for when running as script
+            import sys
+            from pathlib import Path
+            sys.path.insert(0, str(Path(__file__).parent.parent))
+            from ingestion.chunker import Chunker
+    
     # Use default values to avoid circular dependency with config_manager
     # Enable semantic chunking by default for better performance
-    return Chunker(
+    # Model will be loaded on demand to save memory
+    chunker = Chunker(
         chunk_size=1000,
         chunk_overlap=200,
-        use_semantic=True  # Enable semantic chunking
+        use_semantic=True  # Enable semantic chunking with lazy loading
     )
+    
+    print(f"     ✅ Chunker created with memory-efficient semantic chunking")
+    return chunker
 
 def create_llm_client(container: DependencyContainer):
     """Factory for LLMClient"""
     try:
         from ..retrieval.llm_client import LLMClient
     except ImportError:
-        # Fallback for when running as script
-        import sys
-        from pathlib import Path
-        sys.path.insert(0, str(Path(__file__).parent.parent))
-        from retrieval.llm_client import LLMClient
+        try:
+            from rag_system.src.retrieval.llm_client import LLMClient
+        except ImportError:
+            # Last fallback for when running as script
+            import sys
+            from pathlib import Path
+            sys.path.insert(0, str(Path(__file__).parent.parent))
+            from retrieval.llm_client import LLMClient
     
     # Get configuration from config manager
     config_manager = container.get('config_manager')
@@ -288,11 +309,14 @@ def create_reranker(container: DependencyContainer):
     try:
         from ..retrieval.reranker import create_reranker as create_reranker_func
     except ImportError:
-        # Fallback for when running as script
-        import sys
-        from pathlib import Path
-        sys.path.insert(0, str(Path(__file__).parent.parent))
-        from retrieval.reranker import create_reranker as create_reranker_func
+        try:
+            from rag_system.src.retrieval.reranker import create_reranker as create_reranker_func
+        except ImportError:
+            # Last fallback for when running as script
+            import sys
+            from pathlib import Path
+            sys.path.insert(0, str(Path(__file__).parent.parent))
+            from retrieval.reranker import create_reranker as create_reranker_func
     
     config_manager = container.get('config_manager')
     reranker = create_reranker_func(config_manager)
@@ -305,11 +329,14 @@ def create_query_enhancer(container: DependencyContainer):
     try:
         from ..retrieval.query_enhancer import create_query_enhancer as create_query_enhancer_func
     except ImportError:
-        # Fallback for when running as script
-        import sys
-        from pathlib import Path
-        sys.path.insert(0, str(Path(__file__).parent.parent))
-        from retrieval.query_enhancer import create_query_enhancer as create_query_enhancer_func
+        try:
+            from rag_system.src.retrieval.query_enhancer import create_query_enhancer as create_query_enhancer_func
+        except ImportError:
+            # Last fallback for when running as script
+            import sys
+            from pathlib import Path
+            sys.path.insert(0, str(Path(__file__).parent.parent))
+            from retrieval.query_enhancer import create_query_enhancer as create_query_enhancer_func
     
     config_manager = container.get('config_manager')
     query_enhancer = create_query_enhancer_func(config_manager)
@@ -321,11 +348,14 @@ def create_query_engine(container: DependencyContainer):
     try:
         from ..retrieval.query_engine import QueryEngine
     except ImportError:
-        # Fallback for when running as script
-        import sys
-        from pathlib import Path
-        sys.path.insert(0, str(Path(__file__).parent.parent))
-        from retrieval.query_engine import QueryEngine
+        try:
+            from rag_system.src.retrieval.query_engine import QueryEngine
+        except ImportError:
+            # Last fallback for when running as script
+            import sys
+            from pathlib import Path
+            sys.path.insert(0, str(Path(__file__).parent.parent))
+            from retrieval.query_engine import QueryEngine
     return QueryEngine(
         faiss_store=container.get('faiss_store'),
         embedder=container.get('embedder'),
@@ -341,11 +371,14 @@ def create_ingestion_engine(container: DependencyContainer):
     try:
         from ..ingestion.ingestion_engine import IngestionEngine
     except ImportError:
-        # Fallback for when running as script
-        import sys
-        from pathlib import Path
-        sys.path.insert(0, str(Path(__file__).parent.parent))
-        from ingestion.ingestion_engine import IngestionEngine
+        try:
+            from rag_system.src.ingestion.ingestion_engine import IngestionEngine
+        except ImportError:
+            # Last fallback for when running as script
+            import sys
+            from pathlib import Path
+            sys.path.insert(0, str(Path(__file__).parent.parent))
+            from ingestion.ingestion_engine import IngestionEngine
     return IngestionEngine(
         chunker=container.get('chunker'),
         embedder=container.get('embedder'),
@@ -354,11 +387,32 @@ def create_ingestion_engine(container: DependencyContainer):
         config_manager=container.get('config_manager')
     )
 
+def create_verified_ingestion_engine(container: DependencyContainer):
+    """Factory for VerifiedIngestionEngine"""
+    print(f"     🔧 Creating verified ingestion engine...")
+    try:
+        from .verified_ingestion_engine import VerifiedIngestionEngine
+        from .pipeline_verifier import PipelineVerifier
+        
+        ingestion_engine = container.get('ingestion_engine')
+        verifier = PipelineVerifier(debug_mode=True, save_intermediate=True)
+        
+        verified_engine = VerifiedIngestionEngine(ingestion_engine, verifier)
+        print(f"     ✅ Verified ingestion engine created successfully")
+        return verified_engine
+    except Exception as e:
+        print(f"     ❌ Failed to create verified ingestion engine: {e}")
+        # Return the regular ingestion engine as fallback
+        return container.get('ingestion_engine')
+
 def create_servicenow_integration(container: DependencyContainer):
     """Factory for ServiceNow Integration"""
     print(f"     🔧 Creating ServiceNow integration...")
     try:
-        from ..integrations.servicenow import ServiceNowIntegration
+        try:
+            from ..integrations.servicenow import ServiceNowIntegration
+        except ImportError:
+            from rag_system.src.integrations.servicenow import ServiceNowIntegration
         config_manager = container.get('config_manager')
         ingestion_engine = container.get('ingestion_engine')
         
@@ -377,7 +431,10 @@ def create_conversation_manager(container: DependencyContainer):
     """Factory for ConversationManager"""
     print(f"     🔧 Creating conversation manager...")
     try:
-        from ..conversation.conversation_manager import ConversationManager
+        try:
+            from ..conversation.conversation_manager import ConversationManager
+        except ImportError:
+            from rag_system.src.conversation.conversation_manager import ConversationManager
         conversation_manager = ConversationManager(container)
         print(f"     ✅ Conversation manager created successfully")
         return conversation_manager
@@ -402,6 +459,7 @@ def register_core_services(container: DependencyContainer):
     container.register('query_enhancer', create_query_enhancer)
     container.register('query_engine', create_query_engine)
     container.register('ingestion_engine', create_ingestion_engine)
+    container.register('verified_ingestion_engine', create_verified_ingestion_engine)
     container.register('servicenow_integration', create_servicenow_integration)
     container.register('conversation_manager', create_conversation_manager)
 

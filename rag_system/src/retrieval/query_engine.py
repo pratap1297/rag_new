@@ -8,7 +8,10 @@ from datetime import datetime
 from collections import defaultdict, Counter
 import math
 
-from ..core.error_handling import RetrievalError
+try:
+    from ..core.error_handling import RetrievalError
+except ImportError:
+    from rag_system.src.core.error_handling import RetrievalError
 
 class QueryEngine:
     """Main query processing engine with conversation awareness"""

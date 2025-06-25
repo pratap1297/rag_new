@@ -112,6 +112,10 @@ class PersistentJSONMetadataStore:
                 return self._chunks_cache.get(chunk_id)
         return None
     
+    def get_file_metadata(self, file_id: str) -> Optional[Dict[str, Any]]:
+        """Get metadata for a specific file"""
+        return self._files_cache.get(file_id)
+    
     def get_all_files(self) -> List[Dict[str, Any]]:
         """Get all files with chunk count"""
         files = []

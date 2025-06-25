@@ -8,7 +8,10 @@ import time
 from typing import Optional, Dict, Any
 from abc import ABC, abstractmethod
 
-from ..core.error_handling import LLMError, APIKeyError
+try:
+    from ..core.error_handling import LLMError, APIKeyError
+except ImportError:
+    from rag_system.src.core.error_handling import LLMError, APIKeyError
 
 class BaseLLMClient(ABC):
     """Base class for LLM clients"""
@@ -54,7 +57,7 @@ class GroqClient(BaseLLMClient):
             return response.choices[0].message.content
         except Exception as e:
             logging.error(f"Groq generation error: {e}")
-            raise LLMError(f"Groq generation failed: {e}", provider="groq", model=self.model_name)
+            raise LLMError(f"Groq generation failed: {e}", details={"provider": "groq", "model": self.model_name})
 
 class OpenAIClient(BaseLLMClient):
     """OpenAI LLM client"""
@@ -93,7 +96,7 @@ class OpenAIClient(BaseLLMClient):
             return response.choices[0].message.content
         except Exception as e:
             logging.error(f"OpenAI generation error: {e}")
-            raise LLMError(f"OpenAI generation failed: {e}", provider="openai", model=self.model_name)
+            raise LLMError(f"OpenAI generation failed: {e}", details={"provider": "openai", "model": self.model_name})
 
 class AzureClient(BaseLLMClient):
     """Azure AI Inference LLM client"""
@@ -140,7 +143,7 @@ class AzureClient(BaseLLMClient):
             return response.choices[0].message.content
         except Exception as e:
             logging.error(f"Azure generation error: {e}")
-            raise LLMError(f"Azure generation failed: {e}", provider="azure", model=self.model_name)
+            raise LLMError(f"Azure generation failed: {e}", details={"provider": "azure", "model": self.model_name})
 
 class LLMClient:
     """Main LLM client with provider switching"""

@@ -11,11 +11,14 @@ from abc import ABC, abstractmethod
 try:
     from ..core.error_handling import EmbeddingError
 except ImportError:
-    # Fallback for when running as script
-    import sys
-    from pathlib import Path
-    sys.path.insert(0, str(Path(__file__).parent.parent / 'core'))
-    from error_handling import EmbeddingError
+    try:
+        from rag_system.src.core.error_handling import EmbeddingError
+    except ImportError:
+        # Fallback for when running as script
+        import sys
+        from pathlib import Path
+        sys.path.insert(0, str(Path(__file__).parent.parent / 'core'))
+        from error_handling import EmbeddingError
 
 class BaseEmbedder(ABC):
     """Base class for embedding providers"""
