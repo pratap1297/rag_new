@@ -334,7 +334,8 @@ async def conversation_health_check():
                 state_persistence_status = "enabled"
             else:
                 state_persistence_status = "disabled"
-        except:
+        except Exception as e:
+            logger.error(f"Error checking state persistence status: {e}")
             state_persistence_status = "error"
         
         return {

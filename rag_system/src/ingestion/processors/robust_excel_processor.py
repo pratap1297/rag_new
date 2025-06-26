@@ -452,14 +452,28 @@ class RobustExcelProcessor(BaseProcessor):
     def _extract_image_data(self, image) -> Optional[bytes]:
         """Extract binary data from openpyxl image object"""
         try:
-            if hasattr(image, '_data'):
-                return image._data()
-            elif hasattr(image, 'ref'):
-                # Try to get image data from reference
-                return image.ref
+            # Proper way to extract image data from openpyxl
+            if hasattr(image, 'ref'):
+                # img.ref is an Image object, get the actual bytes
+                if hasattr(image.ref, 'blob'):
+                    image_data = image.ref.blob
+                elif hasattr(image.ref, 'data'):
+                    image_data = image.ref.data()
+                else:
+                    # Try to read from the image path
+                    return None
+            elif hasattr(image, '_data'):
+                image_data = image._data()
             else:
                 self.logger.warning("Could not extract image data - unknown format")
                 return None
+            
+            # Ensure we have bytes
+            if not isinstance(image_data, bytes):
+                return None
+                
+            return image_data
+            
         except Exception as e:
             self.logger.error(f"Failed to extract image data: {e}")
             return None

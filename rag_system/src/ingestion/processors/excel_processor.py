@@ -8,6 +8,7 @@ import logging
 import hashlib
 import json
 import tempfile
+import base64
 from pathlib import Path
 from typing import Dict, Any, List, Optional, Tuple, Union
 from datetime import datetime
@@ -437,12 +438,23 @@ class ExcelProcessor(BaseProcessor):
                     }
                     
                     try:
-                        # Get image data
-                        if hasattr(img, 'ref') and img.ref:
-                            image_data = img.ref
-                        elif hasattr(img, '_data'):
-                            image_data = img._data
+                        # Proper way to extract image data from openpyxl
+                        if hasattr(img, 'ref'):
+                            # img.ref is an Image object, get the actual bytes
+                            if hasattr(img.ref, 'blob'):
+                                image_data = img.ref.blob
+                            elif hasattr(img.ref, 'data'):
+                                image_data = img.ref.data()
+                            else:
+                                # Try to read from the image path
+                                continue
+                        elif hasattr(img, 'data'):
+                            image_data = img.data()
                         else:
+                            continue
+                        
+                        # Ensure we have bytes
+                        if not isinstance(image_data, bytes):
                             continue
                         
                         # Process with Azure AI if available
@@ -592,7 +604,7 @@ class ExcelProcessor(BaseProcessor):
         return relationships
     
     def _create_chunks(self, processed_data: Dict[str, Any]) -> List[Dict[str, Any]]:
-        """Create text chunks for vector storage"""
+        """Create text chunks for vector storage with flat metadata structure"""
         chunks = []
         
         # Chunk sheet data
@@ -620,9 +632,12 @@ class ExcelProcessor(BaseProcessor):
             chunks.append({
                 'text': sheet_text,
                 'metadata': {
-                    'source': 'excel_sheet',
+                    'source_type': 'excel_sheet',
                     'sheet_name': sheet['name'],
-                    'type': 'sheet_data'
+                    'content_type': 'sheet_data',
+                    'dimensions': sheet['dimensions'],
+                    'formula_count': len(sheet.get('formulas', [])),
+                    'data_rows': len(sheet.get('data', []))
                 }
             })
         
@@ -632,9 +647,11 @@ class ExcelProcessor(BaseProcessor):
                 chunks.append({
                     'text': f"Embedded {obj['type']}: {obj['extracted_text']}",
                     'metadata': {
-                        'source': 'embedded_object',
+                        'source_type': 'embedded_object',
                         'object_type': obj['type'],
-                        'type': 'embedded_content'
+                        'content_type': 'embedded_content',
+                        'object_name': obj.get('name', 'unknown'),
+                        'object_size': obj.get('size', 0)
                     }
                 })
         
@@ -653,9 +670,12 @@ class ExcelProcessor(BaseProcessor):
             chunks.append({
                 'text': img_text,
                 'metadata': {
-                    'source': 'excel_image',
-                    'sheet': img['sheet'],
-                    'type': 'image_content'
+                    'source_type': 'excel_image',
+                    'sheet_name': img['sheet'],
+                    'content_type': 'image_content',
+                    'image_index': img.get('index', 0),
+                    'has_extracted_text': 'extracted_text' in img,
+                    'has_analysis': 'analysis' in img
                 }
             })
         
@@ -674,9 +694,11 @@ class ExcelProcessor(BaseProcessor):
                 chunks.append({
                     'text': hier_text,
                     'metadata': {
-                        'source': 'excel_hierarchy',
-                        'sheet': sheet_name,
-                        'type': 'organizational_data'
+                        'source_type': 'excel_hierarchy',
+                        'sheet_name': sheet_name,
+                        'content_type': 'organizational_data',
+                        'hierarchy_type': hierarchy.get('type', 'unknown'),
+                        'structure_count': len(hierarchy.get('structure', []))
                     }
                 })
         
@@ -698,8 +720,12 @@ class ExcelProcessor(BaseProcessor):
         chunks.append({
             'text': meta_text,
             'metadata': {
-                'source': 'excel_metadata',
-                'type': 'file_metadata'
+                'source_type': 'excel_metadata',
+                'content_type': 'file_metadata',
+                'total_sheets': len(processed_data['sheets']),
+                'total_embedded_objects': len(processed_data['embedded_objects']),
+                'total_images': len(processed_data['images']),
+                'has_properties': bool(processed_data['metadata'].get('properties'))
             }
         })
         
@@ -722,6 +748,3 @@ def create_excel_processor(config: Optional[Dict[str, Any]] = None,
             logging.error(f"Failed to create Azure AI client: {e}")
     
     return ExcelProcessor(config=config, azure_client=azure_client)
-
-
-import base64  # Add this import at the top of the file

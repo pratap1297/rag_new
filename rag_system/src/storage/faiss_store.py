@@ -546,10 +546,176 @@ class FAISSStore:
     def _normalize_vectors(self, vectors: np.ndarray) -> np.ndarray:
         """Normalize vectors for cosine similarity"""
         norms = np.linalg.norm(vectors, axis=1, keepdims=True)
-        # Avoid division by zero
-        norms = np.where(norms == 0, 1, norms)
+        norms = np.where(norms == 0, 1, norms)  # Avoid division by zero
         return vectors / norms
     
+    def validate_dimension(self, new_dimension: int) -> bool:
+        """Check if dimension change requires index rebuild"""
+        if self.optimized_index and self.optimized_index.index and self.optimized_index.index.d != new_dimension:
+            logging.error(f"Dimension mismatch: index has {self.optimized_index.index.d}, trying to add {new_dimension}")
+            return False
+        return True
+    
+    def get_current_dimension(self) -> int:
+        """Get the current dimension of the index"""
+        if self.optimized_index and self.optimized_index.index:
+            return self.optimized_index.index.d
+        return self.dimension
+    
+    def migrate_to_new_dimension(self, new_dimension: int, new_embedder, original_texts: List[str] = None):
+        """Migrate existing vectors to new dimension by re-embedding original texts"""
+        if not self.optimized_index or not self.optimized_index.index:
+            logging.info("No existing index to migrate")
+            self.dimension = new_dimension
+            self._create_new_index()
+            return
+        
+        current_dim = self.optimized_index.index.d
+        if current_dim == new_dimension:
+            logging.info(f"Index already has dimension {new_dimension}, no migration needed")
+            return
+        
+        logging.info(f"Migrating index from dimension {current_dim} to {new_dimension}")
+        
+        if not original_texts:
+            logging.warning("No original texts provided for migration. Cannot re-embed vectors.")
+            logging.warning("Consider providing original texts or re-ingesting documents with new embedder.")
+            return False
+        
+        try:
+            # Backup current index
+            backup_path = f"{self.index_path}.backup_{int(time.time())}"
+            self.backup_index(backup_path)
+            logging.info(f"Created backup at {backup_path}")
+            
+            # Collect all active vectors and their metadata
+            active_vectors = []
+            active_metadata = []
+            active_texts = []
+            
+            for vector_id, metadata in self.id_to_metadata.items():
+                if metadata and not metadata.get('deleted', False):
+                    # Find the FAISS index for this vector
+                    faiss_idx = None
+                    for idx, vid in self.index_to_id.items():
+                        if vid == vector_id:
+                            faiss_idx = idx
+                            break
+                    
+                    if faiss_idx is not None and faiss_idx < self.optimized_index.index.ntotal:
+                        try:
+                            # Get the original text for this vector
+                            text = metadata.get('text', metadata.get('content', ''))
+                            if text and text in original_texts:
+                                active_vectors.append(vector_id)
+                                active_metadata.append(metadata)
+                                active_texts.append(text)
+                        except Exception as e:
+                            logging.warning(f"Failed to process vector {vector_id}: {e}")
+                            continue
+            
+            if not active_texts:
+                logging.warning("No valid texts found for migration")
+                return False
+            
+            # Re-embed texts with new embedder
+            logging.info(f"Re-embedding {len(active_texts)} texts with new embedder")
+            new_vectors = []
+            
+            # Process in batches to avoid memory issues
+            batch_size = 100
+            for i in range(0, len(active_texts), batch_size):
+                batch_texts = active_texts[i:i+batch_size]
+                try:
+                    batch_embeddings = new_embedder.embed_documents(batch_texts)
+                    new_vectors.extend(batch_embeddings)
+                    logging.info(f"Re-embedded batch {i//batch_size + 1}/{(len(active_texts) + batch_size - 1)//batch_size}")
+                except Exception as e:
+                    logging.error(f"Failed to re-embed batch {i//batch_size + 1}: {e}")
+                    return False
+            
+            # Validate new vectors have correct dimension
+            if len(new_vectors) != len(active_texts):
+                logging.error(f"Dimension mismatch: expected {len(active_texts)} vectors, got {len(new_vectors)}")
+                return False
+            
+            # Create new index with new dimension
+            self.dimension = new_dimension
+            self._create_new_index()
+            
+            # Add re-embedded vectors
+            vector_ids = self.add_vectors(new_vectors, active_metadata)
+            
+            logging.info(f"Successfully migrated {len(vector_ids)} vectors to dimension {new_dimension}")
+            return True
+            
+        except Exception as e:
+            logging.error(f"Failed to migrate to new dimension: {e}")
+            # Restore from backup if migration failed
+            try:
+                self.restore_index(backup_path)
+                logging.info("Restored index from backup after failed migration")
+            except Exception as restore_error:
+                logging.error(f"Failed to restore from backup: {restore_error}")
+            return False
+    
+    def force_rebuild_for_new_dimension(self, new_dimension: int):
+        """Force rebuild index for new dimension (loses all existing vectors)"""
+        logging.warning(f"Force rebuilding index for new dimension {new_dimension}. All existing vectors will be lost!")
+        
+        try:
+            # Backup current index if it exists
+            if self.optimized_index and self.optimized_index.index and self.optimized_index.index.ntotal > 0:
+                backup_path = f"{self.index_path}.backup_{int(time.time())}"
+                self.backup_index(backup_path)
+                logging.info(f"Created backup at {backup_path}")
+            
+            # Update dimension and create new index
+            self.dimension = new_dimension
+            self._create_new_index()
+            
+            # Save empty index
+            self._save_atomic()
+            
+            logging.info(f"Successfully rebuilt index for dimension {new_dimension}")
+            return True
+            
+        except Exception as e:
+            logging.error(f"Failed to force rebuild index: {e}")
+            return False
+    
+    def check_dimension_compatibility(self, new_dimension: int) -> Dict[str, Any]:
+        """Check compatibility and provide migration options"""
+        current_dim = self.get_current_dimension()
+        
+        result = {
+            'compatible': current_dim == new_dimension,
+            'current_dimension': current_dim,
+            'new_dimension': new_dimension,
+            'migration_required': current_dim != new_dimension,
+            'vector_count': 0,
+            'migration_options': []
+        }
+        
+        if self.optimized_index and self.optimized_index.index:
+            result['vector_count'] = self.optimized_index.index.ntotal
+        
+        if result['migration_required']:
+            result['migration_options'] = [
+                {
+                    'type': 're_embed',
+                    'description': 'Re-embed original texts with new embedder (requires original texts)',
+                    'method': 'migrate_to_new_dimension'
+                },
+                {
+                    'type': 'force_rebuild',
+                    'description': 'Force rebuild index (loses all existing vectors)',
+                    'method': 'force_rebuild_for_new_dimension'
+                }
+            ]
+        
+        return result
+
     def add_vectors(self, vectors: List[List[float]], metadata: List[Dict[str, Any]]) -> List[int]:
         """Thread-safe vector addition with optimization"""
         if len(vectors) != len(metadata):
@@ -558,12 +724,24 @@ class FAISSStore:
         if not vectors:
             return []
         
+        # Debug log to verify structure
+        if logging.getLogger().isEnabledFor(logging.DEBUG):
+            for i, meta in enumerate(metadata[:1]):  # Log first item
+                logging.debug(f"Adding vector with metadata keys: {list(meta.keys())}")
+                if 'metadata' in meta:
+                    logging.warning("Found nested 'metadata' key in input!")
+        
         with self._write_lock_context():
             try:
                 # Convert to numpy array and validate
                 vector_array = np.array(vectors, dtype=np.float32)
-                if vector_array.shape[1] != self.dimension:
-                    raise FAISSError(f"Vector dimension {vector_array.shape[1]} doesn't match index dimension {self.dimension}")
+                
+                # Check dimension compatibility
+                if not self.validate_dimension(vector_array.shape[1]):
+                    raise FAISSError(
+                        f"Vector dimension {vector_array.shape[1]} doesn't match index dimension {self.get_current_dimension()}. "
+                        f"Use check_dimension_compatibility() to see migration options."
+                    )
                 
                 normalized_vectors = self._normalize_vectors(vector_array)
                 
@@ -617,8 +795,13 @@ class FAISSStore:
             try:
                 # Normalize query vector
                 query_array = np.array([query_vector], dtype=np.float32)
-                if query_array.shape[1] != self.dimension:
-                    raise FAISSError(f"Query vector dimension {query_array.shape[1]} doesn't match index dimension {self.dimension}")
+                
+                # Check dimension compatibility
+                if not self.validate_dimension(query_array.shape[1]):
+                    raise FAISSError(
+                        f"Query vector dimension {query_array.shape[1]} doesn't match index dimension {self.get_current_dimension()}. "
+                        f"Use check_dimension_compatibility() to see migration options."
+                    )
                 
                 normalized_query = self._normalize_vectors(query_array)
                 
@@ -676,8 +859,13 @@ class FAISSStore:
             try:
                 # Normalize query vector
                 query_array = np.array([query_vector], dtype=np.float32)
-                if query_array.shape[1] != self.dimension:
-                    raise FAISSError(f"Query vector dimension {query_array.shape[1]} doesn't match index dimension {self.dimension}")
+                
+                # Check dimension compatibility
+                if not self.validate_dimension(query_array.shape[1]):
+                    raise FAISSError(
+                        f"Query vector dimension {query_array.shape[1]} doesn't match index dimension {self.get_current_dimension()}. "
+                        f"Use check_dimension_compatibility() to see migration options."
+                    )
                 
                 normalized_query = self._normalize_vectors(query_array)
                 
@@ -686,57 +874,55 @@ class FAISSStore:
                 
                 results = []
                 for score, idx in zip(scores[0], indices[0]):
-                    if idx == -1:  # FAISS returns -1 for empty slots
+                    if idx == -1:
                         continue
                     
-                    # Get vector ID from index mapping
                     vector_id = self.index_to_id.get(idx)
                     if vector_id is None:
-                        # Create fallback metadata for orphaned vectors
+                        # Handle orphaned vectors
                         result = {
                             'faiss_index': int(idx),
                             'similarity_score': float(score),
                             'score': float(score),
                             'vector_id': f'orphan_{idx}',
                             'doc_id': 'unknown',
-                            'content': 'Content not available (orphaned vector)',
-                            'filename': 'unknown',
-                            'chunk_id': f'chunk_{idx}',
                             'text': 'Content not available (orphaned vector)',
-                            'metadata': {}
+                            'chunk_id': f'chunk_{idx}',
                         }
                         results.append(result)
                         continue
                     
-                    # Get metadata using vector ID
                     if vector_id in self.id_to_metadata:
                         metadata = self.id_to_metadata[vector_id]
                         
-                        # Safely handle None metadata
                         if metadata is None:
                             metadata = {}
-                        else:
-                            metadata = metadata.copy()
                         
-                        # Skip deleted vectors
                         if metadata.get('deleted', False):
                             continue
                         
-                        # Format result for query engine compatibility
-                        result = {
+                        # FIXED: Return all metadata fields at top level, not nested
+                        result = metadata.copy()  # Start with all existing metadata
+                        
+                        # Add/override with search-specific fields
+                        result.update({
                             'faiss_index': int(idx),
                             'similarity_score': float(score),
-                            'score': float(score),  # For compatibility
+                            'score': float(score),
                             'vector_id': str(vector_id),
-                            'doc_id': metadata.get('doc_id', 'unknown'),
-                            'content': metadata.get('content', metadata.get('text', '')),
-                            'text': metadata.get('content', metadata.get('text', '')),  # For compatibility
-                            'filename': metadata.get('filename', metadata.get('file_path', 'unknown')),
-                            'chunk_id': metadata.get('chunk_id', f'chunk_{vector_id}'),
-                            'chunk_index': metadata.get('chunk_index', 0),
-                            'page_number': metadata.get('page_number'),
-                            'metadata': metadata
-                        }
+                            # Ensure key fields exist even if not in metadata
+                            'doc_id': result.get('doc_id', 'unknown'),
+                            'text': result.get('text', result.get('content', '')),
+                            'content': result.get('content', result.get('text', '')),
+                            'chunk_id': result.get('chunk_id', f'chunk_{vector_id}'),
+                        })
+                        
+                        # Debug log to verify output structure
+                        if logging.getLogger().isEnabledFor(logging.DEBUG) and len(results) == 0:
+                            logging.debug(f"Search result keys: {list(result.keys())}")
+                            if 'metadata' in result:
+                                logging.warning("Found nested 'metadata' key in search result!")
+                        
                         results.append(result)
                 
                 return results

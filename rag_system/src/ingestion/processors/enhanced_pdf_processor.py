@@ -234,7 +234,7 @@ class EnhancedPDFProcessor(BaseProcessor):
         return annotations
     
     def _create_enriched_chunks(self, processed_data: Dict) -> List[Dict]:
-        """Create chunks with enriched metadata"""
+        """Create chunks with flat metadata structure compatible with metadata manager"""
         chunks = []
         
         for page_data in processed_data['pages']:
@@ -257,10 +257,12 @@ class EnhancedPDFProcessor(BaseProcessor):
                 ])
                 page_text += f"\n\nTables found on page:\n{table_context}"
             
-            # Create chunk with rich metadata
+            # Create chunk with flat metadata structure
             chunk = {
                 'text': page_text,
                 'metadata': {
+                    'source_type': 'pdf',
+                    'content_type': 'page_content',
                     'page_number': page_data['page_number'],
                     'has_images': len(page_data['images']) > 0,
                     'image_count': len(page_data['images']),
@@ -268,9 +270,10 @@ class EnhancedPDFProcessor(BaseProcessor):
                     'table_count': len(page_data['tables']),
                     'has_annotations': len(page_data['annotations']) > 0,
                     'annotation_count': len(page_data['annotations']),
-                    'pdf_metadata': processed_data['metadata'],
-                    'source_type': 'pdf',
-                    'extraction_method': 'enhanced_with_ocr'
+                    'extraction_method': 'enhanced_with_ocr',
+                    'pdf_title': processed_data['metadata'].get('title', ''),
+                    'pdf_author': processed_data['metadata'].get('author', ''),
+                    'pdf_page_count': processed_data['metadata'].get('page_count', 0)
                 }
             }
             

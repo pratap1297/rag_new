@@ -17,17 +17,21 @@ from ..core.metadata_manager import get_metadata_manager, MetadataSchema
 from .processors.base_processor import ProcessorRegistry
 from .processors.excel_processor import ExcelProcessor
 from .processors import create_processor_registry
+from ..core.progress_tracker import ProgressTracker, ProgressStage, ProgressStatus
+from ..ingestion.progress_integration import ProgressTrackedIngestion
 
 class IngestionEngine:
-    """Main document ingestion engine"""
+    """Main document ingestion engine with progress tracking"""
     
-    def __init__(self, chunker, embedder, faiss_store, metadata_store, config_manager):
+    def __init__(self, chunker, embedder, faiss_store, metadata_store, config_manager, progress_tracker: Optional[ProgressTracker] = None):
         self.chunker = chunker
         self.embedder = embedder
         self.faiss_store = faiss_store
         self.metadata_store = metadata_store
         self.config_manager = config_manager
         self.config = config_manager.get_config()
+        self.progress_tracker = progress_tracker or ProgressTracker()
+        self.progress_helper = ProgressTrackedIngestion(self.progress_tracker)
         
         # Initialize metadata manager
         self.metadata_manager = get_metadata_manager()
@@ -198,21 +202,38 @@ class IngestionEngine:
         return f"docs_{uuid.uuid4().hex[:8]}"
     
     def ingest_file(self, file_path: str, metadata: Dict[str, Any] = None) -> Dict[str, Any]:
-        """Ingest a single file"""
+        """Ingest a single file with progress tracking"""
         file_path = Path(file_path)
-        
         if not file_path.exists():
             raise FileProcessingError(f"File not found: {file_path}")
         
+        # Start progress tracking if available
+        file_progress = None
+        if self.progress_tracker:
+            file_progress = self.progress_tracker.start_file(str(file_path))
+        
         try:
-            # Store current metadata for matching purposes
-            self._current_metadata = metadata or {}
+            # Validation stage
+            if self.progress_helper:
+                with self.progress_helper.track_stage(str(file_path), ProgressStage.VALIDATING):
+                    if file_path.stat().st_size > self.config.ingestion.max_file_size_mb * 1024 * 1024:
+                        raise FileProcessingError(f"File too large: {file_path}")
+            else:
+                # Fallback without progress tracking
+                if file_path.stat().st_size > self.config.ingestion.max_file_size_mb * 1024 * 1024:
+                    raise FileProcessingError(f"File too large: {file_path}")
             
-            # Check if this file path already exists and delete old vectors
+            self._current_metadata = metadata or {}
             old_vectors_deleted = self._handle_existing_file(str(file_path))
             
-            # Extract text from file
-            text_content = self._extract_text(file_path)
+            # Extraction stage
+            extraction_start = datetime.now()
+            if self.progress_helper:
+                with self.progress_helper.track_stage(str(file_path), ProgressStage.EXTRACTING):
+                    text_content = self._extract_text(file_path)
+            else:
+                text_content = self._extract_text(file_path)
+            extraction_time = (datetime.now() - extraction_start).total_seconds()
             
             if not text_content.strip():
                 return {
@@ -221,10 +242,10 @@ class IngestionEngine:
                     'file_path': str(file_path)
                 }
             
-            # Prepare base file metadata
             file_metadata = {
                 'file_path': str(file_path),
-                'filename': file_path.name,  # Use 'filename' instead of 'file_name'
+                'original_filename': metadata.get('original_filename', str(file_path)) if metadata else str(file_path),
+                'filename': file_path.name,
                 'file_size': file_path.stat().st_size,
                 'file_type': file_path.suffix,
                 'source_type': 'file',
@@ -234,8 +255,14 @@ class IngestionEngine:
                 'replaced_vectors': old_vectors_deleted
             }
             
-            # Chunk the text with base metadata
-            chunks = self.chunker.chunk_text(text_content, file_metadata)
+            # Chunking stage
+            chunking_start = datetime.now()
+            if self.progress_helper:
+                with self.progress_helper.track_stage(str(file_path), ProgressStage.CHUNKING):
+                    chunks = self.chunker.chunk_text(text_content, file_metadata)
+            else:
+                chunks = self.chunker.chunk_text(text_content, file_metadata)
+            chunking_time = (datetime.now() - chunking_start).total_seconds()
             
             if not chunks:
                 return {
@@ -244,67 +271,127 @@ class IngestionEngine:
                     'file_path': str(file_path)
                 }
             
-            # Generate embeddings
-            chunk_texts = [chunk['text'] for chunk in chunks]
-            embeddings = self.embedder.embed_texts(chunk_texts)
+            # Embedding stage
+            embedding_start = datetime.now()
+            if self.progress_helper:
+                with self.progress_helper.track_stage(str(file_path), ProgressStage.EMBEDDING):
+                    chunk_texts = [chunk['text'] for chunk in chunks]
+                    embeddings = self.embedder.embed_texts(chunk_texts)
+            else:
+                chunk_texts = [chunk['text'] for chunk in chunks]
+                embeddings = self.embedder.embed_texts(chunk_texts)
+            embedding_time = (datetime.now() - embedding_start).total_seconds()
             
-            # Prepare chunk metadata using metadata manager
-            chunk_metadata_list = []
-            
-            for i, (chunk, embedding) in enumerate(zip(chunks, embeddings)):
-                # Merge metadata using the metadata manager to prevent double flattening
-                try:
-                    merged_metadata = self.metadata_manager.merge_metadata(
-                        file_metadata,           # Base file metadata
-                        metadata or {},          # Custom metadata from user
-                        chunk.get('metadata', {}),  # Chunk-specific metadata
-                        {                        # Final chunk data
+            # Storing stage
+            storage_start = datetime.now()
+            if self.progress_helper:
+                with self.progress_helper.track_stage(str(file_path), ProgressStage.STORING):
+                    chunk_metadata_list = []
+                    for i, (chunk, embedding) in enumerate(zip(chunks, embeddings)):
+                        try:
+                            merged_metadata = self.metadata_manager.merge_metadata(
+                                file_metadata,
+                                metadata or {},
+                                chunk.get('metadata', {}),
+                                {
+                                    'text': chunk['text'],
+                                    'chunk_index': i,
+                                    'total_chunks': len(chunks),
+                                    'chunk_size': len(chunk['text']),
+                                    'chunking_method': getattr(self.chunker.__class__, '__name__', 'unknown'),
+                                    'embedding_model': getattr(self.embedder, 'model_name', 'unknown')
+                                }
+                            )
+                            storage_metadata = self.metadata_manager.prepare_for_storage(merged_metadata)
+                            chunk_metadata_list.append(storage_metadata)
+                        except Exception as e:
+                            logging.error(f"Failed to merge metadata for chunk {i}: {e}")
+                            fallback_meta = {
+                                'text': chunk['text'],
+                                'chunk_index': i,
+                                'doc_id': file_metadata.get('filename', 'unknown'),
+                                'filename': file_metadata.get('filename'),
+                                'file_path': str(file_path),
+                                'source_type': 'file'
+                            }
+                            chunk_metadata_list.append(fallback_meta)
+                    vector_ids = self.faiss_store.add_vectors(embeddings, chunk_metadata_list)
+                    final_file_metadata = {
+                        **file_metadata,
+                        'chunk_count': len(chunks),
+                        'vector_ids': vector_ids,
+                        'doc_id': chunk_metadata_list[0].get('doc_id', 'unknown') if chunk_metadata_list else 'unknown'
+                    }
+                    file_id = self.metadata_store.add_file_metadata(str(file_path), final_file_metadata)
+            else:
+                # Fallback without progress tracking
+                chunk_metadata_list = []
+                for i, (chunk, embedding) in enumerate(zip(chunks, embeddings)):
+                    try:
+                        merged_metadata = self.metadata_manager.merge_metadata(
+                            file_metadata,
+                            metadata or {},
+                            chunk.get('metadata', {}),
+                            {
+                                'text': chunk['text'],
+                                'chunk_index': i,
+                                'total_chunks': len(chunks),
+                                'chunk_size': len(chunk['text']),
+                                'chunking_method': getattr(self.chunker.__class__, '__name__', 'unknown'),
+                                'embedding_model': getattr(self.embedder, 'model_name', 'unknown')
+                            }
+                        )
+                        storage_metadata = self.metadata_manager.prepare_for_storage(merged_metadata)
+                        chunk_metadata_list.append(storage_metadata)
+                    except Exception as e:
+                        logging.error(f"Failed to merge metadata for chunk {i}: {e}")
+                        fallback_meta = {
                             'text': chunk['text'],
                             'chunk_index': i,
-                            'total_chunks': len(chunks),
-                            'chunk_size': len(chunk['text']),
-                            'chunking_method': getattr(self.chunker, '__class__', {}).get('__name__', 'unknown'),
-                            'embedding_model': getattr(self.embedder, 'model_name', 'unknown')
+                            'doc_id': file_metadata.get('filename', 'unknown'),
+                            'filename': file_metadata.get('filename'),
+                            'file_path': str(file_path),
+                            'source_type': 'file'
                         }
-                    )
-                    
-                    # Prepare for storage
-                    storage_metadata = self.metadata_manager.prepare_for_storage(merged_metadata)
-                    chunk_metadata_list.append(storage_metadata)
-                    
-                except Exception as e:
-                    logging.error(f"Failed to merge metadata for chunk {i}: {e}")
-                    # Fallback to simple metadata
-                    fallback_meta = {
-                        'text': chunk['text'],
-                        'chunk_index': i,
-                        'doc_id': file_metadata.get('filename', 'unknown'),
-                        'filename': file_metadata.get('filename'),
-                        'file_path': str(file_path),
-                        'source_type': 'file'
-                    }
-                    chunk_metadata_list.append(fallback_meta)
+                        chunk_metadata_list.append(fallback_meta)
+                vector_ids = self.faiss_store.add_vectors(embeddings, chunk_metadata_list)
+                final_file_metadata = {
+                    **file_metadata,
+                    'chunk_count': len(chunks),
+                    'vector_ids': vector_ids,
+                    'doc_id': chunk_metadata_list[0].get('doc_id', 'unknown') if chunk_metadata_list else 'unknown'
+                }
+                file_id = self.metadata_store.add_file_metadata(str(file_path), final_file_metadata)
             
-            # Add to FAISS store
-            vector_ids = self.faiss_store.add_vectors(embeddings, chunk_metadata_list)
+            storage_time = (datetime.now() - storage_start).total_seconds()
             
-            # Store file metadata
-            final_file_metadata = {
-                **file_metadata,
-                'chunk_count': len(chunks),
-                'vector_ids': vector_ids,
-                'doc_id': chunk_metadata_list[0].get('doc_id', 'unknown') if chunk_metadata_list else 'unknown'
-            }
+            # Indexing stage
+            if self.progress_helper:
+                with self.progress_helper.track_stage(str(file_path), ProgressStage.INDEXING):
+                    pass
             
-            file_id = self.metadata_store.add_file_metadata(str(file_path), final_file_metadata)
+            # Finalizing stage
+            if self.progress_helper:
+                with self.progress_helper.track_stage(str(file_path), ProgressStage.FINALIZING):
+                    pass
+            
+            # Complete the file if progress tracking is available
+            if self.progress_tracker:
+                metrics = {
+                    'chunks_created': len(chunks),
+                    'vectors_created': len(vector_ids),
+                    'extraction_time': extraction_time,
+                    'chunking_time': chunking_time,
+                    'embedding_time': embedding_time,
+                    'storage_time': storage_time
+                }
+                self.progress_tracker.complete_file(str(file_path), metrics)
             
             logging.info(f"Successfully ingested file: {file_path} ({len(chunks)} chunks)")
             if old_vectors_deleted > 0:
                 logging.info(f"Replaced {old_vectors_deleted} old vectors for updated file")
             
-            # Get doc_id for response
             doc_id = chunk_metadata_list[0].get('doc_id', 'unknown') if chunk_metadata_list else 'unknown'
-            
             return {
                 'status': 'success',
                 'file_id': file_id,
@@ -318,7 +405,9 @@ class IngestionEngine:
             
         except Exception as e:
             logging.error(f"Failed to ingest file {file_path}: {e}")
-            raise IngestionError(f"Failed to ingest file: {e}", file_path=str(file_path))
+            if self.progress_tracker:
+                self.progress_tracker.fail_file(str(file_path), e)
+            raise IngestionError(f"Failed to ingest file: {e}", details={"file_path": str(file_path)})
     
     def ingest_text(self, text: str, metadata: Dict[str, Any] = None) -> Dict[str, Any]:
         """Ingest raw text content with managed metadata"""
@@ -365,7 +454,7 @@ class IngestionEngine:
                             'chunk_index': i,
                             'total_chunks': len(chunks),
                             'chunk_size': len(chunk['text']),
-                            'chunking_method': getattr(self.chunker, '__class__', {}).get('__name__', 'unknown'),
+                            'chunking_method': getattr(self.chunker.__class__, '__name__', 'unknown'),
                             'embedding_model': getattr(self.embedder, 'model_name', 'unknown')
                         }
                     )
@@ -408,125 +497,75 @@ class IngestionEngine:
     def _handle_existing_file(self, file_path: str) -> int:
         """Handle existing file by deleting old vectors"""
         try:
-            # Search for existing vectors with this file path
-            existing_vectors = []
+            # Get identifying information from current metadata
+            doc_path = getattr(self, '_current_metadata', {}).get('doc_path') if hasattr(self, '_current_metadata') else None
+            filename = getattr(self, '_current_metadata', {}).get('filename') if hasattr(self, '_current_metadata') else None
             
-            # Extract doc_path from current metadata if available
-            current_doc_path = None
-            current_filename = None
-            if hasattr(self, '_current_metadata') and self._current_metadata:
-                current_doc_path = self._current_metadata.get('doc_path')
-                current_filename = self._current_metadata.get('filename')
+            if not doc_path:
+                # Try to extract from file_path
+                doc_path = self._current_metadata.get('doc_path') if hasattr(self, '_current_metadata') and self._current_metadata else None
             
-            logging.info(f"Looking for existing vectors for file_path: {file_path}, doc_path: {current_doc_path}, filename: {current_filename}")
+            # Find vectors to delete
+            vectors_to_delete = []
             
-            # Get all vector metadata and find matches
             for vector_id, metadata in self.faiss_store.id_to_metadata.items():
                 if metadata.get('deleted', False):
                     continue
                 
-                # Check multiple possible matching criteria
+                # Check for match - metadata is already flat thanks to add_vectors
                 is_match = False
-                match_reason = ""
                 
-                # Priority 1: doc_path match (most reliable for updates)
-                if current_doc_path and metadata.get('doc_path') == current_doc_path:
+                # Priority 1: doc_path match (most reliable)
+                if doc_path and metadata.get('doc_path') == doc_path:
                     is_match = True
-                    match_reason = f"doc_path match: {metadata.get('doc_path')}"
-                
-                # Priority 2: Check nested metadata for doc_path
-                elif current_doc_path and isinstance(metadata.get('metadata'), dict):
-                    nested_doc_path = metadata['metadata'].get('doc_path')
-                    if nested_doc_path == current_doc_path:
-                        is_match = True
-                        match_reason = f"nested doc_path match: {nested_doc_path}"
-                
-                # Priority 3: filename match (for same filename uploads)
-                elif current_filename and metadata.get('filename') == current_filename:
+                # Priority 2: filename match
+                elif filename and metadata.get('filename') == filename:
                     is_match = True
-                    match_reason = f"filename match: {metadata.get('filename')}"
-                
-                # Priority 4: Check nested metadata for filename
-                elif current_filename and isinstance(metadata.get('metadata'), dict):
-                    nested_filename = metadata['metadata'].get('filename')
-                    if nested_filename == current_filename:
-                        is_match = True
-                        match_reason = f"nested filename match: {nested_filename}"
-                
-                # Priority 5: Direct file_path match (least reliable for updates)
+                # Priority 3: file_path match
                 elif metadata.get('file_path') == file_path:
                     is_match = True
-                    match_reason = f"file_path match: {metadata.get('file_path')}"
                 
                 if is_match:
-                    existing_vectors.append(vector_id)
-                    logging.info(f"Found matching vector {vector_id}: {match_reason}")
+                    vectors_to_delete.append(vector_id)
             
-            if existing_vectors:
-                logging.info(f"Found {len(existing_vectors)} existing vectors")
-                # Delete old vectors
-                self.faiss_store.delete_vectors(existing_vectors)
-                logging.info(f"Deleted {len(existing_vectors)} old vectors for file update")
-                return len(existing_vectors)
-            else:
-                logging.info(f"No existing vectors found for file: {file_path}")
-                # Debug: Print some metadata samples
-                sample_count = 0
-                for vector_id, metadata in self.faiss_store.id_to_metadata.items():
-                    if not metadata.get('deleted', False) and sample_count < 3:
-                        logging.debug(f"Sample vector {vector_id} metadata keys: {list(metadata.keys())}")
-                        if 'doc_path' in metadata:
-                            logging.debug(f"  doc_path: {metadata['doc_path']}")
-                        if 'file_path' in metadata:
-                            logging.debug(f"  file_path: {metadata['file_path']}")
-                        if isinstance(metadata.get('metadata'), dict):
-                            nested_meta = metadata['metadata']
-                            if 'doc_path' in nested_meta:
-                                logging.debug(f"  nested doc_path: {nested_meta['doc_path']}")
-                            if 'filename' in nested_meta:
-                                logging.debug(f"  nested filename: {nested_meta['filename']}")
-                        sample_count += 1
-            
+            if vectors_to_delete:
+                self.faiss_store.delete_vectors(vectors_to_delete)
+                return len(vectors_to_delete)
+                
             return 0
             
         except Exception as e:
             logging.warning(f"Error handling existing file {file_path}: {e}")
             return 0
     
-    def ingest_directory(self, directory_path: str, file_patterns: List[str] = None) -> Dict[str, Any]:
-        """Ingest all files in a directory"""
+    def ingest_directory(self, directory_path: str, file_patterns: List[str] = None, batch_id: Optional[str] = None) -> Dict[str, Any]:
+        """Ingest all files in a directory with batch progress tracking"""
         directory = Path(directory_path)
-        
         if not directory.exists():
             raise IngestionError(f"Directory not found: {directory_path}")
-        
-        # Default file patterns
         if file_patterns is None:
             file_patterns = self.config.ingestion.supported_formats
-        
-        # Find files to ingest
         files_to_ingest = []
         for pattern in file_patterns:
             files_to_ingest.extend(directory.rglob(f"*{pattern}"))
-        
+        if batch_id:
+            self.progress_tracker.create_batch(batch_id, [str(f) for f in files_to_ingest])
         results = {
+            'batch_id': batch_id,
             'total_files': len(files_to_ingest),
             'successful': 0,
             'failed': 0,
             'skipped': 0,
             'results': []
         }
-        
         for file_path in files_to_ingest:
             try:
                 result = self.ingest_file(str(file_path))
                 results['results'].append(result)
-                
                 if result['status'] == 'success':
                     results['successful'] += 1
                 elif result['status'] == 'skipped':
                     results['skipped'] += 1
-                    
             except Exception as e:
                 results['failed'] += 1
                 results['results'].append({
@@ -535,10 +574,8 @@ class IngestionEngine:
                     'error': str(e)
                 })
                 logging.error(f"Failed to ingest {file_path}: {e}")
-        
         logging.info(f"Directory ingestion completed: {results['successful']} successful, "
                     f"{results['failed']} failed, {results['skipped']} skipped")
-        
         return results
     
     def _extract_text(self, file_path: Path) -> str:

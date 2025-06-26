@@ -60,8 +60,10 @@ class PDFProcessor(BaseProcessor):
         chunks = [{
             'text': f"PDF document: {file_path.name}",
             'metadata': {
-                'source': str(file_path),
-                'chunk_type': 'pdf_placeholder'
+                'source_type': 'pdf',
+                'content_type': 'pdf_placeholder',
+                'file_path': str(file_path),
+                'processor': 'basic_pdf'
             }
         }]
         result['chunks'] = chunks

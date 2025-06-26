@@ -41,7 +41,8 @@ class FolderMonitorConnectionManager:
         for connection in self.active_connections:
             try:
                 await connection.send_text(json.dumps(message))
-            except:
+            except Exception as e:
+                logging.error(f"Error broadcasting message to websocket: {e}")
                 disconnected.append(connection)
         
         # Remove disconnected connections

@@ -11,7 +11,7 @@ import os
 
 from .conversation_state import (
     ConversationState, ConversationPhase, MessageType,
-    add_message_to_state
+    add_message_to_state, _apply_memory_management
 )
 from .conversation_nodes import ConversationNodes
 
@@ -176,6 +176,9 @@ class ConversationGraph:
                 config=config
             )
             
+            # Apply memory management to prevent leaks
+            result = _apply_memory_management(result)
+            
             self.logger.info(f"Conversation processed successfully for thread {thread_id}, phase: {result['current_phase']}")
             return result
             
@@ -196,6 +199,9 @@ class ConversationGraph:
             error_state = add_message_to_state(current_state, MessageType.ASSISTANT, error_response)
             error_state['has_errors'] = True
             error_state['error_messages'] = current_state.get('error_messages', []) + [str(e)]
+            
+            # Apply memory management to error state as well
+            error_state = _apply_memory_management(error_state)
             
             return error_state
     

@@ -137,6 +137,8 @@ class VerifiedIngestionEngine:
                     'chunk_index': i,
                     'doc_id': str(file_path),
                     'filename': os.path.basename(file_path),
+                    'original_filename': str(file_path),  # Store full path
+                    'file_path': str(file_path),  # Store full path
                     **(chunk.get('metadata', {}))
                 }
                 metadata_to_add.append(chunk_metadata)

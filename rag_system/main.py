@@ -4,10 +4,56 @@ RAG System Entry Point
 """
 import logging
 import sys
+import atexit
+import signal
 from pathlib import Path
 
 # Add src to path
 sys.path.insert(0, str(Path(__file__).parent / "src"))
+
+# Global thread pool reference for cleanup
+thread_pool = None
+
+def cleanup_thread_pool():
+    """Ensure thread pool is properly closed"""
+    global thread_pool
+    
+    # Clean up the API thread pool
+    if thread_pool:
+        try:
+            thread_pool.shutdown(wait=False)
+            logging.info("✅ API thread pool shutdown complete")
+        except Exception as e:
+            logging.error(f"Error shutting down API thread pool: {e}")
+        finally:
+            thread_pool = None
+    
+    # Clean up global application lifecycle and all managed resources
+    try:
+        from src.core.resource_manager import get_global_app, ResourceManager
+        app_lifecycle = get_global_app()
+        if app_lifecycle:
+            logging.info("🔄 Cleaning up global application lifecycle...")
+            app_lifecycle.shutdown()
+            logging.info("✅ Global application lifecycle cleanup complete")
+        
+        # Clean up all resource manager instances
+        ResourceManager.cleanup_all_instances()
+        logging.info("✅ All resource manager instances cleaned up")
+        
+    except Exception as e:
+        logging.error(f"Error during global cleanup: {e}")
+
+def signal_handler(signum, frame):
+    """Handle shutdown signals"""
+    logging.info(f"Received signal {signum}, initiating cleanup...")
+    cleanup_thread_pool()
+    sys.exit(0)
+
+# Register cleanup with atexit and signal handlers
+atexit.register(cleanup_thread_pool)
+signal.signal(signal.SIGINT, signal_handler)
+signal.signal(signal.SIGTERM, signal_handler)
 
 def main():
     """Main entry point"""
@@ -89,6 +135,17 @@ def main():
         from src.api.main import create_api_app
         logging.info("Creating FastAPI application...")
         api_app = create_api_app(container, monitoring, heartbeat_monitor, folder_monitor, enhanced_folder_monitor)
+        
+        # Capture thread pool reference for cleanup
+        global thread_pool
+        try:
+            import src.api.main as api_main
+            thread_pool = api_main.thread_pool
+            if thread_pool:
+                logging.info("✅ Thread pool captured for cleanup")
+        except Exception as e:
+            logging.warning(f"Could not capture thread pool reference: {e}")
+        
         logging.info("FastAPI application created successfully")
         
         # Start continuous health monitoring (if enabled in config)
@@ -146,8 +203,10 @@ def main():
         
     except KeyboardInterrupt:
         logging.info("Received shutdown signal")
+        cleanup_thread_pool()
     except Exception as e:
         logging.error(f"Failed to start RAG System: {e}")
+        cleanup_thread_pool()
         import traceback
         traceback.print_exc()
         sys.exit(1)

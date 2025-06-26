@@ -1,24 +1,60 @@
 """
 Gradio UI Application
-Enhanced web interface for the RAG system with conversation support
+Enhanced web interface for the RAG system with conversation support and progress tracking
 """
 import logging
 from typing import Optional, Dict, Any, List, Tuple
 import uuid
 import time
+import threading
+from datetime import datetime
 
 def create_gradio_app(container) -> Optional[object]:
-    """Create Gradio application with conversation support"""
+    """Create Gradio application with conversation support and progress tracking"""
     try:
         # Optional Gradio interface - only if gradio is installed
         import gradio as gr
+        
+        # Import progress tracking components
+        try:
+            from ..core.progress_tracker import ProgressTracker, ProgressStage, ProgressStatus
+            from ..ui.progress_monitor import ProgressMonitor
+            PROGRESS_TRACKING_AVAILABLE = True
+        except ImportError:
+            PROGRESS_TRACKING_AVAILABLE = False
+            logging.warning("Progress tracking components not available")
         
         query_engine = container.get('query_engine')
         ingestion_engine = container.get('ingestion_engine')
         conversation_manager = container.get('conversation_manager')
         
+        # Initialize progress tracker if available
+        progress_tracker = None
+        progress_monitor = None
+        if PROGRESS_TRACKING_AVAILABLE:
+            try:
+                progress_tracker = ProgressTracker(persistence_path="data/progress/ingestion_progress.json")
+                progress_monitor = ProgressMonitor(progress_tracker)
+                
+                # Update ingestion engine with progress tracker
+                if hasattr(ingestion_engine, 'progress_tracker'):
+                    ingestion_engine.progress_tracker = progress_tracker
+                    ingestion_engine.progress_helper = getattr(ingestion_engine, 'progress_helper', None) or None
+                
+                logging.info("Progress tracker initialized for Gradio UI")
+            except Exception as e:
+                logging.error(f"Failed to initialize progress tracker: {e}")
+                PROGRESS_TRACKING_AVAILABLE = False
+        
         # Conversation state management
         current_session = {"session_id": None, "conversation_history": []}
+        
+        # Progress tracking state
+        progress_state = {
+            "last_update": datetime.now(),
+            "active_files": set(),
+            "batch_id": None
+        }
         
         def process_query(query: str, top_k: int = 5):
             """Process a query through the RAG system"""
@@ -29,15 +65,97 @@ def create_gradio_app(container) -> Optional[object]:
                 return f"Error: {str(e)}", ""
         
         def upload_file(file):
-            """Upload and ingest a file"""
+            """Upload and ingest a file with progress tracking"""
             try:
                 if file is None:
                     return "No file uploaded"
                 
-                result = ingestion_engine.ingest_file(file.name)
-                return f"File ingested successfully: {result['chunks_created']} chunks created"
+                if PROGRESS_TRACKING_AVAILABLE and progress_tracker:
+                    # Generate batch ID for this upload
+                    batch_id = str(uuid.uuid4())
+                    progress_state["batch_id"] = batch_id
+                    progress_state["active_files"].add(file.name)
+                    
+                    # Start progress tracking
+                    progress_tracker.start_file(file.name)
+                    
+                    # Ingest with progress tracking
+                    result = ingestion_engine.ingest_file(file.name)
+                    
+                    # Update progress state
+                    progress_state["active_files"].discard(file.name)
+                    progress_state["last_update"] = datetime.now()
+                    
+                    return f"File ingested successfully: {result['chunks_created']} chunks created\nBatch ID: {batch_id}"
+                else:
+                    # Fallback without progress tracking
+                    result = ingestion_engine.ingest_file(file.name)
+                    return f"File ingested successfully: {result['chunks_created']} chunks created"
+                    
             except Exception as e:
+                if PROGRESS_TRACKING_AVAILABLE and progress_tracker:
+                    progress_state["active_files"].discard(file.name if file else "unknown")
                 return f"Error: {str(e)}"
+        
+        def get_progress_data():
+            """Get current progress data for UI display"""
+            if not PROGRESS_TRACKING_AVAILABLE or not progress_tracker:
+                return "Progress tracking not available", "", ""
+            
+            try:
+                # Get all progress
+                all_progress = progress_tracker.get_all_progress()
+                system_metrics = progress_tracker.get_system_metrics()
+                
+                # Format file progress
+                file_progress_text = ""
+                for file_path, progress in all_progress.items():
+                    if progress.status in [ProgressStatus.RUNNING, ProgressStatus.COMPLETED, ProgressStatus.FAILED]:
+                        file_progress_text += f"📄 {Path(file_path).name}\n"
+                        file_progress_text += f"   Status: {progress.status.value}\n"
+                        file_progress_text += f"   Stage: {progress.current_stage.value}\n"
+                        file_progress_text += f"   Progress: {progress.overall_progress * 100:.1f}%\n"
+                        if progress.chunks_created > 0:
+                            file_progress_text += f"   Chunks: {progress.chunks_created}\n"
+                        if progress.vectors_created > 0:
+                            file_progress_text += f"   Vectors: {progress.vectors_created}\n"
+                        if progress.estimated_time_remaining:
+                            file_progress_text += f"   ETA: {progress.estimated_time_remaining}\n"
+                        file_progress_text += "\n"
+                
+                # Format system metrics
+                metrics_text = f"📊 System Metrics\n"
+                metrics_text += f"Files Processed: {system_metrics.get('total_files_processed', 0)}\n"
+                metrics_text += f"Total Chunks: {system_metrics.get('total_chunks_created', 0)}\n"
+                metrics_text += f"Total Vectors: {system_metrics.get('total_vectors_created', 0)}\n"
+                metrics_text += f"Errors: {system_metrics.get('total_errors', 0)}\n"
+                if 'files_per_minute' in system_metrics:
+                    metrics_text += f"Rate: {system_metrics['files_per_minute']:.2f} files/min\n"
+                if 'mb_per_minute' in system_metrics:
+                    metrics_text += f"Data Rate: {system_metrics['mb_per_minute']:.2f} MB/min\n"
+                metrics_text += f"CPU: {system_metrics.get('cpu_percent', 0):.1f}%\n"
+                metrics_text += f"Memory: {system_metrics.get('memory_percent', 0):.1f}%\n"
+                
+                # Format batch progress if available
+                batch_text = ""
+                if progress_state["batch_id"]:
+                    batch_progress = progress_tracker.get_batch_progress(progress_state["batch_id"])
+                    if batch_progress:
+                        batch_text = f"📦 Batch Progress (ID: {progress_state['batch_id'][:8]}...)\n"
+                        batch_text += f"Total Files: {batch_progress.get('total_files', 0)}\n"
+                        batch_text += f"Completed: {batch_progress.get('completed_files', 0)}\n"
+                        batch_text += f"Failed: {batch_progress.get('failed_files', 0)}\n"
+                        batch_text += f"Running: {batch_progress.get('running_files', 0)}\n"
+                        batch_text += f"Overall Progress: {batch_progress.get('overall_progress', 0) * 100:.1f}%\n"
+                
+                return file_progress_text, metrics_text, batch_text
+                
+            except Exception as e:
+                return f"Error getting progress: {str(e)}", "", ""
+        
+        def refresh_progress():
+            """Refresh progress data"""
+            return get_progress_data()
         
         # Conversation functions
         def start_new_conversation():
@@ -133,10 +251,11 @@ def create_gradio_app(container) -> Optional[object]:
             .chat-message { margin: 5px 0; padding: 10px; border-radius: 10px; }
             .user-message { background-color: #e3f2fd; text-align: right; }
             .assistant-message { background-color: #f3e5f5; text-align: left; }
+            .progress-container { max-height: 400px; overflow-y: auto; }
             """
         ) as app:
             gr.Markdown("# 🤖 AI Force Intelligent Support Agent")
-            gr.Markdown("Enhanced RAG system with LangGraph-powered conversations")
+            gr.Markdown("Enhanced RAG system with LangGraph-powered conversations and progress tracking")
             
             with gr.Tab("💬 Conversation Chat"):
                 gr.Markdown("### Intelligent Conversational Interface")
@@ -243,8 +362,78 @@ def create_gradio_app(container) -> Optional[object]:
                     inputs=[file_input],
                     outputs=[upload_output]
                 )
+            
+            # Add Progress Monitor Tab
+            with gr.Tab("📊 Progress Monitor"):
+                gr.Markdown("### Real-time Ingestion Progress")
+                gr.Markdown("Monitor document ingestion progress in real-time")
+                
+                with gr.Row():
+                    with gr.Column(scale=2):
+                        gr.Markdown("#### 📄 File Progress")
+                        file_progress_display = gr.Textbox(
+                            label="Active Files",
+                            lines=10,
+                            interactive=False,
+                            value="No active files"
+                        )
+                    
+                    with gr.Column(scale=1):
+                        gr.Markdown("#### 📦 Batch Progress")
+                        batch_progress_display = gr.Textbox(
+                            label="Current Batch",
+                            lines=6,
+                            interactive=False,
+                            value="No active batch"
+                        )
+                
+                with gr.Row():
+                    with gr.Column(scale=2):
+                        gr.Markdown("#### 📊 System Metrics")
+                        system_metrics_display = gr.Textbox(
+                            label="Performance Metrics",
+                            lines=8,
+                            interactive=False,
+                            value="No metrics available"
+                        )
+                    
+                    with gr.Column(scale=1):
+                        gr.Markdown("#### 🔄 Controls")
+                        refresh_progress_btn = gr.Button("🔄 Refresh Progress", variant="primary")
+                        auto_refresh_toggle = gr.Checkbox(label="Auto-refresh (5s)", value=False)
+                
+                # Initialize progress display
+                initial_progress = get_progress_data()
+                file_progress_display.value = initial_progress[0] or "No active files"
+                system_metrics_display.value = initial_progress[1] or "No metrics available"
+                batch_progress_display.value = initial_progress[2] or "No active batch"
+                
+                # Event handlers for progress monitoring
+                refresh_progress_btn.click(
+                    fn=refresh_progress,
+                    outputs=[file_progress_display, system_metrics_display, batch_progress_display]
+                )
+                
+                # Auto-refresh functionality
+                def auto_refresh_progress():
+                    """Auto-refresh progress every 5 seconds"""
+                    while True:
+                        time.sleep(5)
+                        try:
+                            progress_data = get_progress_data()
+                            yield progress_data[0], progress_data[1], progress_data[2]
+                        except Exception as e:
+                            logging.error(f"Auto-refresh error: {e}")
+                            yield "Auto-refresh error", "Auto-refresh error", "Auto-refresh error"
+                
+                # Set up auto-refresh
+                auto_refresh_toggle.change(
+                    fn=auto_refresh_progress,
+                    outputs=[file_progress_display, system_metrics_display, batch_progress_display],
+                    every=5
+                )
         
-        logging.info("Enhanced Gradio app with conversation support created")
+        logging.info("Enhanced Gradio app with conversation support and progress tracking created")
         return app
         
     except ImportError:

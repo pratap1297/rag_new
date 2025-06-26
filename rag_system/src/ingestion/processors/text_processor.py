@@ -107,9 +107,14 @@ class TextProcessor(BaseProcessor):
             chunks.append({
                 'text': content,
                 'metadata': {
-                    'source': str(file_path),
-                    'chunk_type': 'full_document',
-                    'chunk_index': 0
+                    'source_type': 'text',
+                    'content_type': 'full_document',
+                    'chunk_index': 0,
+                    'file_path': str(file_path),
+                    'language': language,
+                    'content_type_detected': content_type,
+                    'word_count': word_count,
+                    'line_count': line_count
                 }
             })
         else:
@@ -119,11 +124,14 @@ class TextProcessor(BaseProcessor):
                 chunks.append({
                     'text': chunk_text,
                     'metadata': {
-                        'source': str(file_path),
-                        'chunk_type': 'text_chunk',
+                        'source_type': 'text',
+                        'content_type': 'text_chunk',
                         'chunk_index': len(chunks),
                         'start_char': i,
-                        'end_char': min(i + chunk_size, len(content))
+                        'end_char': min(i + chunk_size, len(content)),
+                        'file_path': str(file_path),
+                        'language': language,
+                        'content_type_detected': content_type
                     }
                 })
         

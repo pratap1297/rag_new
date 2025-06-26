@@ -24,7 +24,7 @@ class BaseEmbedder(ABC):
     """Base class for embedding providers"""
     
     @abstractmethod
-    def embed_texts(self, texts: List[str]) -> List[List[float]]:
+    def embed_texts(self, texts: List[str], batch_size: Optional[int] = None) -> List[List[float]]:
         pass
     
     @abstractmethod
@@ -53,15 +53,18 @@ class SentenceTransformerEmbedder(BaseEmbedder):
         except Exception as e:
             raise EmbeddingError(f"Failed to load SentenceTransformer model: {e}")
     
-    def embed_texts(self, texts: List[str]) -> List[List[float]]:
+    def embed_texts(self, texts: List[str], batch_size: Optional[int] = None) -> List[List[float]]:
         """Generate embeddings for multiple texts"""
         if not texts:
             return []
         
+        # Use provided batch_size or fall back to instance batch_size
+        effective_batch_size = batch_size or self.batch_size
+        
         try:
             all_embeddings = []
-            for i in range(0, len(texts), self.batch_size):
-                batch = texts[i:i + self.batch_size]
+            for i in range(0, len(texts), effective_batch_size):
+                batch = texts[i:i + effective_batch_size]
                 batch_embeddings = self.model.encode(
                     batch,
                     convert_to_numpy=True,
@@ -112,16 +115,19 @@ class CohereEmbedder(BaseEmbedder):
         except Exception as e:
             raise EmbeddingError(f"Failed to initialize Cohere client: {e}")
     
-    def embed_texts(self, texts: List[str]) -> List[List[float]]:
+    def embed_texts(self, texts: List[str], batch_size: Optional[int] = None) -> List[List[float]]:
         """Generate embeddings for multiple texts"""
         if not texts:
             return []
         
+        # Use provided batch_size or fall back to instance batch_size
+        effective_batch_size = batch_size or self.batch_size
+        
         try:
             import time
             all_embeddings = []
-            for i in range(0, len(texts), self.batch_size):
-                batch = texts[i:i + self.batch_size]
+            for i in range(0, len(texts), effective_batch_size):
+                batch = texts[i:i + effective_batch_size]
                 start_time = time.time()
                 response = self.client.embed(
                     texts=batch,
@@ -185,16 +191,19 @@ class AzureEmbedder(BaseEmbedder):
         except Exception as e:
             raise EmbeddingError(f"Failed to initialize Azure AI Inference client: {e}")
     
-    def embed_texts(self, texts: List[str]) -> List[List[float]]:
+    def embed_texts(self, texts: List[str], batch_size: Optional[int] = None) -> List[List[float]]:
         """Generate embeddings for multiple texts"""
         if not texts:
             return []
         
+        # Use provided batch_size or fall back to instance batch_size
+        effective_batch_size = batch_size or self.batch_size
+        
         try:
             import time
             all_embeddings = []
-            for i in range(0, len(texts), self.batch_size):
-                batch = texts[i:i + self.batch_size]
+            for i in range(0, len(texts), effective_batch_size):
+                batch = texts[i:i + effective_batch_size]
                 start_time = time.time()
                 response = self.client.embed(
                     input=batch,
@@ -260,13 +269,79 @@ class Embedder:
         else:
             raise EmbeddingError(f"Unsupported embedding provider: {self.provider}")
     
+    def calculate_optimal_batch_size(self, text_lengths: List[int]) -> int:
+        """Calculate optimal batch size based on available memory and text characteristics"""
+        try:
+            import psutil
+            
+            # Get available memory
+            available_memory = psutil.virtual_memory().available
+            
+            if not text_lengths:
+                return min(self.batch_size, 32)  # Default fallback
+            
+            # Calculate average text length
+            avg_text_length = np.mean(text_lengths)
+            max_text_length = max(text_lengths)
+            
+            # Estimate memory usage per text
+            # Rough estimate: each character uses ~4 bytes, with overhead for embeddings
+            # Embedding dimension affects memory usage significantly
+            embedding_dim = self.get_dimension()
+            estimated_memory_per_text = (avg_text_length * 4 + embedding_dim * 4) * 3  # 3x overhead for processing
+            
+            # Use 40% of available memory to be conservative
+            max_batch_size = int((available_memory * 0.4) / estimated_memory_per_text)
+            
+            # Ensure reasonable bounds
+            min_batch_size = 1
+            max_batch_size = min(max_batch_size, self.batch_size * 2)  # Don't exceed 2x configured batch size
+            
+            # Adjust based on text length characteristics
+            if max_text_length > avg_text_length * 3:
+                # If there are very long texts, reduce batch size
+                max_batch_size = max_batch_size // 2
+            
+            optimal_batch_size = max(min_batch_size, min(max_batch_size, self.batch_size))
+            
+            logging.debug(f"Optimal batch size: {optimal_batch_size} "
+                         f"(available_memory: {available_memory/1024/1024:.1f}MB, "
+                         f"avg_text_length: {avg_text_length:.1f}, "
+                         f"embedding_dim: {embedding_dim})")
+            
+            return optimal_batch_size
+            
+        except ImportError:
+            logging.warning("psutil not available, using default batch size")
+            return min(self.batch_size, 32)
+        except Exception as e:
+            logging.warning(f"Error calculating optimal batch size: {e}, using default")
+            return min(self.batch_size, 32)
+    
     def embed_text(self, text: str) -> List[float]:
         """Generate embedding for a single text"""
         return self.embed_texts([text])[0]
     
     def embed_texts(self, texts: List[str]) -> List[List[float]]:
-        """Generate embeddings for multiple texts"""
-        return self.embedder.embed_texts(texts)
+        """Generate embeddings for multiple texts with adaptive batch sizing"""
+        if not texts:
+            return []
+        
+        # Calculate optimal batch size based on text characteristics
+        text_lengths = [len(text) for text in texts]
+        optimal_batch_size = self.calculate_optimal_batch_size(text_lengths)
+        
+        # Use adaptive batch processing
+        all_embeddings = []
+        for i in range(0, len(texts), optimal_batch_size):
+            batch = texts[i:i + optimal_batch_size]
+            batch_embeddings = self.embedder.embed_texts(batch, batch_size=optimal_batch_size)
+            all_embeddings.extend(batch_embeddings)
+            
+            logging.debug(f"Processed batch {i//optimal_batch_size + 1}/{(len(texts) + optimal_batch_size - 1)//optimal_batch_size} "
+                         f"({len(batch)} texts, batch_size: {optimal_batch_size})")
+        
+        return all_embeddings
     
     def get_dimension(self) -> int:
         """Get embedding dimension"""

@@ -50,6 +50,9 @@ class APIConfig:
     workers: int = 1
     reload: bool = False
     cors_origins: list = None
+    health_check_timeout: float = 10.0  # 10 seconds for health checks
+    stats_timeout: float = 10.0  # 10 seconds for stats operations
+    llm_test_timeout: float = 15.0  # 15 seconds for LLM test operations
 
 @dataclass
 class IngestionConfig:
@@ -59,12 +62,14 @@ class IngestionConfig:
     supported_formats: list = None
     max_file_size_mb: int = 100
     batch_size: int = 10
+    timeout: float = 300.0  # 5 minutes default for text ingestion
+    file_timeout: float = 600.0  # 10 minutes default for file processing
 
 @dataclass
 class RetrievalConfig:
     """Retrieval configuration"""
     top_k: int = 5
-    similarity_threshold: float = 0.0  # Set to 0.0 for debugging - accept all results
+    similarity_threshold: float = 0.7  # Good default for normalized cosine similarity (range -1 to 1)
     rerank_top_k: int = 3
     enable_reranking: bool = True
 

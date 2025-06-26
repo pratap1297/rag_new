@@ -22,6 +22,7 @@ class MetadataSchema:
     # Document identifiers
     doc_path: Optional[str] = None
     filename: Optional[str] = None
+    original_filename: Optional[str] = None
     file_path: Optional[str] = None
     
     # Content metadata

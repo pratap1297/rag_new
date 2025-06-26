@@ -74,7 +74,8 @@ class ServiceNowUI:
                         timeout=30
                     )
                     return response.status_code == 200
-                except:
+                except Exception as e:
+                    print(f"ServiceNow connection test failed: {e}")
                     return False
             
             def get_incidents(self, filters=None, limit=100):
@@ -96,7 +97,8 @@ class ServiceNowUI:
                         return data.get('result', [])
                     else:
                         return []
-                except:
+                except Exception as e:
+                    print(f"Error getting incidents from ServiceNow: {e}")
                     return []
         
         return DirectServiceNowConnector()

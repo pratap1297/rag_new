@@ -2,7 +2,7 @@
 FastAPI Application
 Main API application for the RAG system
 """
-from fastapi import FastAPI, HTTPException, Depends, UploadFile, File, BackgroundTasks
+from fastapi import FastAPI, HTTPException, Depends, UploadFile, File, BackgroundTasks, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from typing import Dict, Any, Optional, List
@@ -12,6 +12,8 @@ import time
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 import atexit
+
+logger = logging.getLogger(__name__)
 
 # Import modules with fallback mechanism
 def safe_import(relative_import, absolute_import):
@@ -61,6 +63,17 @@ except ImportError:
         logging.warning(f"Could not import API routers: {e}")
         create_management_router = None
         verification_router = None
+
+try:
+    from ..core.progress_tracker import ProgressTracker
+    from ..ui.progress_monitor import ProgressMonitor
+except ImportError:
+    try:
+        from rag_system.src.core.progress_tracker import ProgressTracker
+        from rag_system.src.ui.progress_monitor import ProgressMonitor
+    except ImportError:
+        ProgressTracker = None
+        ProgressMonitor = None
 
 # Global heartbeat monitor - will be set by main.py
 heartbeat_monitor = None
@@ -505,9 +518,14 @@ Answer:"""
         # Run with timeout
         loop = asyncio.get_event_loop()
         try:
+            # Get configurable timeout from config manager
+            config_manager = container.get('config_manager')
+            config = config_manager.get_config()
+            ingestion_timeout = getattr(config.ingestion, 'timeout', 300.0)  # 5 minutes default
+            
             result = await asyncio.wait_for(
                 loop.run_in_executor(thread_pool, _process_text),
-                timeout=120.0  # 2 minute timeout for ingestion
+                timeout=ingestion_timeout
             )
             return result
         except asyncio.TimeoutError:
@@ -543,6 +561,10 @@ Answer:"""
                     # Get ingestion engine
                     ingestion_engine = container.get('ingestion_engine')
                     
+                    # Ensure original filename is preserved in metadata
+                    if 'original_filename' not in metadata:
+                        metadata['original_filename'] = filename
+                    
                     # Process file
                     result = ingestion_engine.ingest_file(tmp_file_path, metadata)
                     return result
@@ -559,9 +581,14 @@ Answer:"""
         # Run with timeout
         loop = asyncio.get_event_loop()
         try:
+            # Get configurable timeout from config manager
+            config_manager = container.get('config_manager')
+            config = config_manager.get_config()
+            file_processing_timeout = getattr(config.ingestion, 'file_timeout', 600.0)  # 10 minutes default for files
+            
             result = await asyncio.wait_for(
                 loop.run_in_executor(thread_pool, _process_file),
-                timeout=300.0  # 5 minute timeout for file processing
+                timeout=file_processing_timeout
             )
             return result
         except asyncio.TimeoutError:
@@ -592,6 +619,7 @@ Answer:"""
             # Add file info to metadata
             file_metadata.update({
                 "filename": file.filename,
+                "original_filename": file.filename,  # Add original filename for source labels
                 "content_type": file.content_type,
                 "file_size": len(file_content)
             })
@@ -637,12 +665,16 @@ Answer:"""
             try:
                 # Test embedder
                 embedder = container.get('embedder')
+                config_manager = container.get('config_manager')
+                config = config_manager.get_config()
+                health_check_timeout = getattr(config.api, 'health_check_timeout', 10.0)
+                
                 test_embedding = await asyncio.wait_for(
                     asyncio.get_event_loop().run_in_executor(
                         thread_pool, 
                         lambda: embedder.embed_text("test")
                     ),
-                    timeout=10.0
+                    timeout=health_check_timeout
                 )
                 health_status['components']['embedder'] = {
                     'status': 'healthy',
@@ -667,12 +699,14 @@ Answer:"""
             # Test LLM client
             try:
                 llm_client = container.get('llm_client')
+                llm_test_timeout = getattr(config.api, 'llm_test_timeout', 15.0)
+                
                 test_response = await asyncio.wait_for(
                     asyncio.get_event_loop().run_in_executor(
                         thread_pool,
                         lambda: llm_client.generate("Hello", max_tokens=5)
                     ),
-                    timeout=15.0
+                    timeout=llm_test_timeout
                 )
                 health_status['components']['llm_client'] = {
                     'status': 'healthy',
@@ -734,9 +768,13 @@ Answer:"""
                 return enhanced_stats
             
             loop = asyncio.get_event_loop()
+            config_manager = container.get('config_manager')
+            config = config_manager.get_config()
+            stats_timeout = getattr(config.api, 'stats_timeout', 10.0)
+            
             stats = await asyncio.wait_for(
                 loop.run_in_executor(thread_pool, _get_stats),
-                timeout=10.0
+                timeout=stats_timeout
             )
             return stats
             
@@ -785,9 +823,13 @@ Answer:"""
                 }
             
             loop = asyncio.get_event_loop()
+            config_manager = container.get('config_manager')
+            config = config_manager.get_config()
+            stats_timeout = getattr(config.api, 'stats_timeout', 10.0)
+            
             result = await asyncio.wait_for(
                 loop.run_in_executor(thread_pool, _get_documents),
-                timeout=10.0
+                timeout=stats_timeout
             )
             return result
             
@@ -2238,6 +2280,89 @@ Answer:"""
             if thread_pool and hasattr(thread_pool, 'shutdown'):
                 thread_pool.shutdown(wait=True)
                 logging.info("✅ Thread pool shutdown complete")
+
+    # Initialize progress tracker and monitor
+    progress_tracker = None
+    progress_monitor = None
+    
+    try:
+        if ProgressTracker and ProgressMonitor:
+            progress_tracker = ProgressTracker(persistence_path="data/progress/ingestion_progress.json")
+            progress_monitor = ProgressMonitor(progress_tracker)
+            
+            # Pass progress_tracker to ingestion engine
+            ingestion_engine = container.get('ingestion_engine')
+            if ingestion_engine and hasattr(ingestion_engine, 'progress_tracker'):
+                ingestion_engine.progress_tracker = progress_tracker
+                if hasattr(ingestion_engine, 'progress_helper'):
+                    from ..ingestion.progress_integration import ProgressTrackedIngestion
+                    ingestion_engine.progress_helper = ProgressTrackedIngestion(progress_tracker)
+            
+            logging.info("✅ Progress tracker initialized successfully")
+        else:
+            logging.warning("⚠️ Progress tracking components not available")
+    except Exception as e:
+        logging.error(f"❌ Failed to initialize progress tracker: {e}")
+        progress_tracker = None
+        progress_monitor = None
+
+    # WebSocket endpoint for real-time progress monitoring
+    @app.websocket("/ws/progress")
+    async def websocket_progress(websocket: WebSocket):
+        if not progress_monitor:
+            await websocket.accept()
+            await websocket.send_json({"error": "Progress monitoring not available"})
+            await websocket.close()
+            return
+        
+        await progress_monitor.connect(websocket)
+        try:
+            while True:
+                await websocket.receive_text()
+        except Exception:
+            progress_monitor.disconnect(websocket)
+    
+    # Get progress for all files
+    @app.get("/progress/all")
+    async def get_all_progress():
+        if not progress_tracker or not progress_monitor:
+            raise HTTPException(status_code=503, detail="Progress tracking not available")
+        
+        return {
+            'files': {
+                path: progress_monitor._serialize_progress(progress)
+                for path, progress in progress_tracker.get_all_progress().items()
+            },
+            'system_metrics': progress_tracker.get_system_metrics()
+        }
+    
+    # Get progress for a specific file
+    @app.get("/progress/file/{file_path:path}")
+    async def get_file_progress(file_path: str):
+        if not progress_tracker or not progress_monitor:
+            raise HTTPException(status_code=503, detail="Progress tracking not available")
+        
+        progress = progress_tracker.get_progress(file_path)
+        if progress:
+            return progress_monitor._serialize_progress(progress)
+        else:
+            raise HTTPException(status_code=404, detail="File not found in progress tracker")
+    
+    # Get progress for a batch
+    @app.get("/progress/batch/{batch_id}")
+    async def get_batch_progress(batch_id: str):
+        if not progress_tracker:
+            raise HTTPException(status_code=503, detail="Progress tracking not available")
+        
+        return progress_tracker.get_batch_progress(batch_id)
+    
+    # Get system metrics
+    @app.get("/progress/metrics")
+    async def get_progress_metrics():
+        if not progress_tracker:
+            raise HTTPException(status_code=503, detail="Progress tracking not available")
+        
+        return progress_tracker.get_system_metrics()
 
     logging.info("FastAPI application created")
     return app

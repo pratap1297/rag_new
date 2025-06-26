@@ -3809,7 +3809,7 @@ def create_fixed_interface():
     }
     .status-success { color: #28a745; font-weight: bold; }
     .status-error { color: #dc3545; font-weight: bold; }
-    .status-warning { color: #ffc107; font-weight: bold; }
+    .status-warning { color: #2196f3; font-weight: bold; }
     
     /* Enhanced conversation styles */
     .conversation-suggestions {
@@ -3864,11 +3864,11 @@ def create_fixed_interface():
     }
     
     .conversation-insights {
-        background: linear-gradient(135deg, #fff3cd 0%, #ffeaa7 100%);
+        background: linear-gradient(135deg, #e3f2fd 0%, #bbdefb 100%);
         border-radius: 8px;
         padding: 12px;
         margin: 8px 0;
-        border-left: 4px solid #ffc107;
+        border-left: 4px solid #2196f3;
     }
     
     .entity-card {

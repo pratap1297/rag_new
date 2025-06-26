@@ -8,6 +8,13 @@ from datetime import datetime
 from enum import Enum
 import uuid
 
+# Memory management constants
+MAX_CONVERSATION_HISTORY = 20  # Maximum number of messages to keep in history
+MAX_TOPICS_DISCUSSED = 10      # Maximum number of topics to track
+MAX_ERROR_MESSAGES = 5         # Maximum number of error messages to keep
+MAX_SUGGESTED_QUESTIONS = 5    # Maximum number of suggested questions to keep
+MAX_RELATED_TOPICS = 5         # Maximum number of related topics to keep
+
 class MessageType(Enum):
     USER = "user"
     ASSISTANT = "assistant"
@@ -152,7 +159,7 @@ def create_conversation_state(thread_id: Optional[str] = None) -> ConversationSt
     )
 
 def add_message_to_state(state: ConversationState, message_type: MessageType, content: str, metadata: Dict[str, Any] = None) -> ConversationState:
-    """Add a new message to the conversation state"""
+    """Add a new message to the conversation state with memory management"""
     message = Message(
         id=str(uuid.uuid4()),
         type=message_type,
@@ -163,11 +170,46 @@ def add_message_to_state(state: ConversationState, message_type: MessageType, co
     
     # Create a new state with updated values
     new_state = state.copy()
-    new_state['messages'] = state['messages'] + [message]
+    
+    # Add message and limit history size
+    new_state['messages'] = state['messages'][-MAX_CONVERSATION_HISTORY+1:] + [message]
     new_state['turn_count'] = state['turn_count'] + 1
     new_state['last_activity'] = datetime.now().isoformat()
     
+    # Apply memory management to prevent leaks
+    new_state = _apply_memory_management(new_state)
+    
     return new_state
+
+def _apply_memory_management(state: ConversationState) -> ConversationState:
+    """Apply memory management to limit growing lists in conversation state"""
+    managed_state = state.copy()
+    
+    # Limit topics discussed
+    if 'topics_discussed' in managed_state and len(managed_state['topics_discussed']) > MAX_TOPICS_DISCUSSED:
+        managed_state['topics_discussed'] = managed_state['topics_discussed'][-MAX_TOPICS_DISCUSSED:]
+    
+    # Limit error messages
+    if 'error_messages' in managed_state and len(managed_state['error_messages']) > MAX_ERROR_MESSAGES:
+        managed_state['error_messages'] = managed_state['error_messages'][-MAX_ERROR_MESSAGES:]
+    
+    # Limit suggested questions
+    if 'suggested_questions' in managed_state and len(managed_state['suggested_questions']) > MAX_SUGGESTED_QUESTIONS:
+        managed_state['suggested_questions'] = managed_state['suggested_questions'][-MAX_SUGGESTED_QUESTIONS:]
+    
+    # Limit related topics
+    if 'related_topics' in managed_state and len(managed_state['related_topics']) > MAX_RELATED_TOPICS:
+        managed_state['related_topics'] = managed_state['related_topics'][-MAX_RELATED_TOPICS:]
+    
+    # Limit search results (keep only top results)
+    if 'search_results' in managed_state and len(managed_state['search_results']) > 10:
+        managed_state['search_results'] = managed_state['search_results'][:10]
+    
+    # Limit context chunks
+    if 'context_chunks' in managed_state and len(managed_state['context_chunks']) > 10:
+        managed_state['context_chunks'] = managed_state['context_chunks'][:10]
+    
+    return managed_state
 
 def get_conversation_history(state: ConversationState, max_messages: int = 10) -> List[Message]:
     """Get recent conversation history"""

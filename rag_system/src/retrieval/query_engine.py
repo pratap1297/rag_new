@@ -73,8 +73,12 @@ class QueryEngine:
                 except Exception as e:
                     logging.warning(f"Query enhancement failed, using original query: {e}")
             
-            # Search with multiple query variants
+            # Search with multiple query variants and track performance
             all_results = []
+            best_variant = None
+            best_variant_score = 0
+            variant_performance = []
+            
             for query_text, confidence in query_variants[:3]:  # Use top 3 variants
                 # Generate query embedding
                 query_embedding = self.embedder.embed_text(query_text)
@@ -86,6 +90,21 @@ class QueryEngine:
                     k=search_k
                 )
                 
+                # Calculate variant performance score
+                if search_results:
+                    variant_avg_score = sum(r.get('similarity_score', 0) for r in search_results) / len(search_results)
+                    variant_performance.append({
+                        'query_text': query_text,
+                        'confidence': confidence,
+                        'avg_score': variant_avg_score,
+                        'result_count': len(search_results)
+                    })
+                    
+                    # Track best performing variant
+                    if variant_avg_score > best_variant_score:
+                        best_variant = query_text
+                        best_variant_score = variant_avg_score
+                
                 # Add confidence weighting to results
                 for result in search_results:
                     result['query_confidence'] = confidence
@@ -95,6 +114,35 @@ class QueryEngine:
                     result['weighted_score'] = original_score * confidence
                 
                 all_results.extend(search_results)
+            
+            # Log variant performance for debugging
+            if variant_performance:
+                logging.info(f"Query variant performance: {variant_performance}")
+                logging.info(f"Best variant: '{best_variant}' (score: {best_variant_score:.3f})")
+            
+            # Determine which query to use for LLM context
+            # Use best variant if it's significantly better than original query
+            query_for_llm = original_query
+            if best_variant and best_variant_score > 0.7:
+                # Check if best variant is significantly better than original
+                original_variant_score = next(
+                    (v['avg_score'] for v in variant_performance if v['query_text'] == original_query), 
+                    0.0
+                )
+                
+                # If original query not in variants, use a reasonable baseline
+                if original_variant_score == 0.0:
+                    # Use the lowest score as baseline for comparison
+                    min_score = min(v['avg_score'] for v in variant_performance) if variant_performance else 0.0
+                    original_variant_score = min_score * 0.8  # Assume original would be slightly worse
+                
+                if best_variant_score > original_variant_score * 1.2:  # 20% better threshold
+                    query_for_llm = best_variant
+                    logging.info(f"Using enhanced query for LLM: '{best_variant}' (score: {best_variant_score:.3f} vs original: {original_variant_score:.3f})")
+                else:
+                    logging.info(f"Keeping original query for LLM (enhanced not significantly better)")
+            else:
+                logging.info(f"Best variant score too low ({best_variant_score:.3f}), using original query")
             
             # Deduplicate and merge results
             search_results = self._merge_search_results(all_results)
@@ -139,7 +187,7 @@ class QueryEngine:
             
             # Generate response using LLM with conversation context
             response = self._generate_llm_response(
-                original_query, 
+                query_for_llm, 
                 top_results, 
                 conversation_context
             )
@@ -170,11 +218,22 @@ class QueryEngine:
                     'keywords': enhanced_query.keywords,
                     'expanded_queries': enhanced_query.expanded_queries,
                     'reformulated_queries': enhanced_query.reformulated_queries,
-                    'total_variants': len(query_variants)
+                    'total_variants': len(query_variants),
+                    'variant_performance': variant_performance,
+                    'best_variant': best_variant,
+                    'best_variant_score': best_variant_score,
+                    'query_used_for_llm': query_for_llm,
+                    'enhanced_query_used': query_for_llm != original_query
                 }
             
             # Add debugging logging as suggested in con_sug.md
             logging.info(f"Query engine returning: response length={len(response)}, sources count={len(top_results)}")
+            
+            # Log query enhancement effectiveness
+            if enhanced_query and variant_performance:
+                logging.info(f"Query enhancement summary: {len(variant_performance)} variants tested, "
+                           f"best score: {best_variant_score:.3f}, "
+                           f"enhanced query used: {query_for_llm != original_query}")
             
             return response_data
             
@@ -185,11 +244,12 @@ class QueryEngine:
                               conversation_context: Optional[Dict[str, Any]] = None) -> str:
         """Generate response using LLM with retrieved sources and conversation context"""
         
-        # Build context from sources
+        # Build context from sources with meaningful labels
         context_parts = []
         for i, source in enumerate(sources[:5]):  # Use top 5 sources
             text = source.get('text', '')
-            context_parts.append(f"Source {i+1}: {text}")
+            source_label = self._get_source_label(source, i + 1)
+            context_parts.append(f"{source_label}: {text}")
         
         context = "\n\n".join(context_parts)
         
@@ -228,6 +288,7 @@ Important instructions:
 - If the user is asking for "more" information, focus on details not mentioned before
 - If the context doesn't contain additional information beyond what was discussed, acknowledge this
 - Be conversational and natural
+- When referencing information, mention the source file name when available
 
 Answer:"""
         else:
@@ -239,6 +300,11 @@ Context:
 
 Question: {query}
 
+Instructions:
+- Provide a clear, accurate answer based on the context
+- When referencing specific information, mention the source file name when available
+- If information comes from multiple sources, acknowledge this
+
 Answer:"""
         
         try:
@@ -247,22 +313,61 @@ Answer:"""
             logging.error(f"LLM generation failed: {e}")
             return "I apologize, but I'm unable to generate a response at the moment due to a technical issue."
     
+    def _get_source_label(self, source: Dict[str, Any], fallback_index: int) -> str:
+        """Get the best available source label for a source"""
+        # FIXED: Access fields directly, not through nested metadata
+        # Priority order for source labels
+        source_options = [
+            source.get('original_filename'),  # Full original filename with path
+            source.get('file_path'),          # Full file path
+            source.get('filename'),           # Filename from source
+            source.get('source'),             # Source field
+            source.get('doc_id'),             # Document ID
+            f"Source {fallback_index}"        # Fallback
+        ]
+        
+        # Return the first non-empty, non-'unknown' option
+        for option in source_options:
+            if option and option != 'unknown' and option != 'N/A':
+                # Clean up the label for display
+                if isinstance(option, str):
+                    # If it's a full path, show just the filename or a shortened path
+                    if '/' in option or '\\' in option:
+                        # For full paths, show the last 2-3 path components
+                        path_parts = option.replace('\\', '/').split('/')
+                        if len(path_parts) > 3:
+                            return f".../{'/'.join(path_parts[-3:])}"
+                        else:
+                            return option
+                    else:
+                        return option
+                return str(option)
+        
+        return f"Source {fallback_index}"
+    
     # ... rest of the existing methods remain the same ...
     
     def _format_sources(self, sources: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """Format sources for response"""
         formatted_sources = []
         
-        for source in sources:
+        for i, source in enumerate(sources):
+            # Get the best source label
+            source_label = self._get_source_label(source, i + 1)
+            
             formatted_source = {
                 'text': source.get('text', '')[:200] + "..." if len(source.get('text', '')) > 200 else source.get('text', ''),
                 'similarity_score': source.get('similarity_score', 0),
                 'rerank_score': source.get('rerank_score'),
                 'original_score': source.get('original_score'),
                 'metadata': source.get('metadata', {}),
-                'source_type': source.get('metadata', {}).get('source_type', 'unknown'),
+                'source_type': source.get('source_type', 'unknown'),
                 'doc_id': source.get('doc_id', 'unknown'),
-                'chunk_id': source.get('chunk_id', 'unknown')
+                'chunk_id': source.get('chunk_id', 'unknown'),
+                'source_label': source_label,
+                'original_filename': source.get('original_filename'),
+                'file_path': source.get('file_path'),
+                'filename': source.get('filename')
             }
             formatted_sources.append(formatted_source)
         
@@ -321,10 +426,10 @@ Answer:"""
         unique_authors = set()
         
         for result in results:
-            metadata = result.get('metadata', {})
-            doc_id = metadata.get('doc_id') or result.get('doc_id', 'unknown')
-            source_type = metadata.get('source_type', 'unknown')
-            author = metadata.get('author', metadata.get('creator', 'unknown'))
+            # FIXED: Access fields directly, not through nested metadata
+            doc_id = result.get('doc_id', 'unknown')
+            source_type = result.get('source_type', 'unknown')
+            author = result.get('author', result.get('creator', 'unknown'))
             
             unique_docs.add(doc_id)
             unique_source_types.add(source_type)
@@ -420,11 +525,11 @@ Answer:"""
         date_counts = Counter()
         
         for result in results:
-            metadata = result.get('metadata', {})
-            doc_id = metadata.get('doc_id', result.get('doc_id', 'unknown'))
-            source_type = metadata.get('source_type', 'unknown')
-            author = metadata.get('author', metadata.get('creator', 'unknown'))
-            date = metadata.get('created_date', metadata.get('date', 'unknown'))
+            # FIXED: Access fields directly, not through nested metadata
+            doc_id = result.get('doc_id', 'unknown')
+            source_type = result.get('source_type', 'unknown')
+            author = result.get('author', result.get('creator', 'unknown'))
+            date = result.get('created_date', result.get('date', 'unknown'))
             
             doc_counts[doc_id] += 1
             source_type_counts[source_type] += 1
@@ -436,11 +541,11 @@ Answer:"""
         scored_results = []
         
         for result in results:
-            metadata = result.get('metadata', {})
-            doc_id = metadata.get('doc_id', result.get('doc_id', 'unknown'))
-            source_type = metadata.get('source_type', 'unknown')
-            author = metadata.get('author', metadata.get('creator', 'unknown'))
-            date = metadata.get('created_date', metadata.get('date', 'unknown'))
+            # FIXED: Access fields directly, not through nested metadata
+            doc_id = result.get('doc_id', 'unknown')
+            source_type = result.get('source_type', 'unknown')
+            author = result.get('author', result.get('creator', 'unknown'))
+            date = result.get('created_date', result.get('date', 'unknown'))
             
             # Document diversity score (lower is better for diversity)
             doc_frequency = doc_counts[doc_id] / total_results
@@ -558,10 +663,10 @@ Answer:"""
             if len(selected) >= top_k:
                 break
             
-            metadata = result.get('metadata', {})
-            doc_id = metadata.get('doc_id', result.get('doc_id', 'unknown'))
-            source_type = metadata.get('source_type', 'unknown')
-            author = metadata.get('author', metadata.get('creator', 'unknown'))
+            # FIXED: Access fields directly, not through nested metadata
+            doc_id = result.get('doc_id', 'unknown')
+            source_type = result.get('source_type', 'unknown')
+            author = result.get('author', result.get('creator', 'unknown'))
             
             # Check diversity constraints
             should_select = False
@@ -599,8 +704,8 @@ Answer:"""
                 if remaining_slots <= 0:
                     break
                 
-                metadata = result.get('metadata', {})
-                doc_id = metadata.get('doc_id', result.get('doc_id', 'unknown'))
+                # FIXED: Access fields directly, not through nested metadata
+                doc_id = result.get('doc_id', 'unknown')
                 
                 # Only add if document is under chunk limit
                 if doc_chunk_counts[doc_id] < self.max_chunks_per_doc:
@@ -626,8 +731,11 @@ Answer:"""
                 'unique_authors': 0,
                 'document_distribution': {},
                 'source_type_distribution': {},
+                'author_distribution': {},
                 'diversity_index': 0.0,
-                'coverage_score': 0.0
+                'coverage_score': 0.0,
+                'average_chunks_per_doc': 0.0,
+                'max_chunks_from_single_doc': 0
             }
         
         # Count unique elements
@@ -639,10 +747,10 @@ Answer:"""
         author_counts = Counter()
         
         for result in results:
-            metadata = result.get('metadata', {})
-            doc_id = metadata.get('doc_id', result.get('doc_id', 'unknown'))
-            source_type = metadata.get('source_type', 'unknown')
-            author = metadata.get('author', metadata.get('creator', 'unknown'))
+            # FIXED: Access fields directly, not through nested metadata
+            doc_id = result.get('doc_id', 'unknown')
+            source_type = result.get('source_type', 'unknown')
+            author = result.get('author', result.get('creator', 'unknown'))
             
             unique_docs.add(doc_id)
             unique_source_types.add(source_type)

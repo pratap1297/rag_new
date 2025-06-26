@@ -9,9 +9,14 @@ import uuid
 
 from .conversation_state import (
     ConversationState, MessageType, ConversationPhase,
-    create_conversation_state, add_message_to_state, get_conversation_history
+    create_conversation_state, add_message_to_state, get_conversation_history,
+    MAX_CONVERSATION_HISTORY, _apply_memory_management
 )
 from .conversation_graph import ConversationGraph
+
+# Memory management constants
+MAX_CONVERSATION_AGE_HOURS = 24  # Maximum age of conversations to keep
+MAX_ACTIVE_CONVERSATIONS = 100   # Maximum number of active conversations
 
 class ConversationManager:
     """Manages conversations using LangGraph with built-in state persistence"""
@@ -23,7 +28,14 @@ class ConversationManager:
         # Initialize conversation graph with state persistence
         self.conversation_graph = ConversationGraph(container, db_path)
         
-        self.logger.info("ConversationManager initialized with LangGraph state persistence")
+        # Run initial cleanup of old conversations
+        try:
+            cleanup_result = self.cleanup_old_conversations()
+            self.logger.info(f"Initial conversation cleanup: {cleanup_result.get('cleaned_count', 0)} conversations removed")
+        except Exception as e:
+            self.logger.warning(f"Initial conversation cleanup failed: {e}")
+        
+        self.logger.info("ConversationManager initialized with LangGraph state persistence and memory management")
     
     def start_conversation(self, thread_id: Optional[str] = None) -> Dict[str, Any]:
         """Start a new conversation or get existing one using thread_id"""
@@ -127,6 +139,83 @@ class ConversationManager:
                 'active_count': 0,
                 'threads': [],
                 'error': str(e)
+            }
+    
+    def cleanup_old_conversations(self) -> Dict[str, Any]:
+        """Clean up old conversations to prevent memory leaks"""
+        
+        try:
+            # Get all conversation threads
+            threads = self.conversation_graph.list_conversation_threads()
+            cleaned_count = 0
+            current_time = datetime.now()
+            
+            for thread_id in threads:
+                try:
+                    # Get conversation history to check age
+                    history = self.get_conversation_history(thread_id, max_messages=1)
+                    
+                    if history.get('messages'):
+                        # Check if conversation is old
+                        last_message = history['messages'][-1]
+                        last_activity = datetime.fromisoformat(last_message['timestamp'])
+                        
+                        if (current_time - last_activity).total_seconds() > MAX_CONVERSATION_AGE_HOURS * 3600:
+                            # Remove old conversation
+                            self.conversation_graph.checkpointer.delete({"configurable": {"thread_id": thread_id}})
+                            cleaned_count += 1
+                            self.logger.info(f"Cleaned up old conversation: {thread_id}")
+                    
+                except Exception as e:
+                    self.logger.warning(f"Error checking conversation {thread_id}: {e}")
+                    continue
+            
+            self.logger.info(f"Conversation cleanup completed: {cleaned_count} old conversations removed")
+            
+            return {
+                'cleaned_count': cleaned_count,
+                'total_threads': len(threads),
+                'timestamp': current_time.isoformat()
+            }
+            
+        except Exception as e:
+            self.logger.error(f"Error during conversation cleanup: {e}")
+            return {
+                'cleaned_count': 0,
+                'error': str(e),
+                'timestamp': datetime.now().isoformat()
+            }
+    
+    def get_memory_stats(self) -> Dict[str, Any]:
+        """Get memory usage statistics for conversations"""
+        
+        try:
+            threads = self.conversation_graph.list_conversation_threads()
+            total_messages = 0
+            total_topics = 0
+            
+            for thread_id in threads:
+                try:
+                    history = self.get_conversation_history(thread_id)
+                    total_messages += len(history.get('messages', []))
+                    total_topics += len(history.get('topics_discussed', []))
+                except:
+                    continue
+            
+            return {
+                'active_conversations': len(threads),
+                'total_messages': total_messages,
+                'total_topics': total_topics,
+                'max_conversation_history': MAX_CONVERSATION_HISTORY,
+                'max_conversation_age_hours': MAX_CONVERSATION_AGE_HOURS,
+                'timestamp': datetime.now().isoformat()
+            }
+            
+        except Exception as e:
+            self.logger.error(f"Error getting memory stats: {e}")
+            return {
+                'error': str(e),
+                'timestamp': datetime.now().isoformat()
             }
     
     def _format_response(self, state: ConversationState, thread_id: str) -> Dict[str, Any]:
