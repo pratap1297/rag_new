@@ -724,12 +724,28 @@ class FAISSStore:
         if not vectors:
             return []
         
+        # Pre-process metadata to ensure no nesting
+        cleaned_metadata = []
+        for meta in metadata:
+            # If metadata has nested 'metadata' key, flatten it
+            if isinstance(meta.get('metadata'), dict):
+                logging.warning("Found nested metadata in FAISS store input - flattening")
+                nested = meta.pop('metadata')
+                flat_meta = meta.copy()
+                # Merge nested metadata, but don't override existing keys
+                for k, v in nested.items():
+                    if k not in flat_meta and k != 'metadata':
+                        flat_meta[k] = v
+                cleaned_metadata.append(flat_meta)
+            else:
+                cleaned_metadata.append(meta)
+        
         # Debug log to verify structure
         if logging.getLogger().isEnabledFor(logging.DEBUG):
-            for i, meta in enumerate(metadata[:1]):  # Log first item
+            for i, meta in enumerate(cleaned_metadata[:1]):  # Log first item
                 logging.debug(f"Adding vector with metadata keys: {list(meta.keys())}")
                 if 'metadata' in meta:
-                    logging.warning("Found nested 'metadata' key in input!")
+                    logging.error("Still found nested 'metadata' key after cleaning!")
         
         with self._write_lock_context():
             try:
@@ -753,7 +769,7 @@ class FAISSStore:
                 
                 # Update metadata atomically
                 vector_ids = []
-                for i, meta in enumerate(metadata):
+                for i, meta in enumerate(cleaned_metadata):
                     vector_id = self.next_id
                     faiss_index = current_index_size + i
                     

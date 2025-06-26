@@ -7,6 +7,7 @@ import mimetypes
 from pathlib import Path
 from typing import Dict, List, Any, Optional
 from datetime import datetime
+import os
 
 from ..core.error_handling import IngestionError, FileProcessingError
 from ..core.unified_error_handling import (
@@ -43,18 +44,36 @@ class IngestionEngine:
             logging.info(f"DEBUG: Created processor config with keys: {list(processor_config.keys())}")
             
             # Add Azure AI config if available
+            azure_config = None
             try:
-                azure_config = self.config_manager.get_config('azure_ai')
-                if azure_config:
-                    processor_config['azure_ai'] = azure_config.__dict__
-                    logging.info("DEBUG: Added Azure AI config to processor config")
+                azure_config_obj = self.config_manager.get_config('azure_ai')
+                if azure_config_obj:
+                    azure_config = azure_config_obj.__dict__
+                    processor_config['azure_ai'] = azure_config
+                    logging.info("Azure AI config added to processor config")
             except Exception as e:
                 logging.debug(f"Azure AI config not available: {e}")
             
             # Create registry with all processors
-            logging.info("DEBUG: About to call create_processor_registry")
             self.processor_registry = create_processor_registry(processor_config)
-            logging.info(f"Processor registry initialized with {len(self.processor_registry.list_processors())} processors: {self.processor_registry.list_processors()}")
+            
+            # If we have Azure config, ensure enhanced PDF processor is registered
+            if azure_config and azure_config.get('computer_vision_endpoint') and azure_config.get('computer_vision_key'):
+                try:
+                    from .processors.enhanced_pdf_processor import EnhancedPDFProcessor
+                    from ..integrations.azure_ai.azure_client import AzureAIClient
+                    
+                    # Create Azure client
+                    azure_client = AzureAIClient(azure_config)
+                    
+                    # Create and register enhanced PDF processor
+                    enhanced_pdf = EnhancedPDFProcessor(processor_config, azure_client)
+                    self.processor_registry.register(enhanced_pdf)
+                    logging.info("Enhanced PDF Processor with Azure CV registered successfully")
+                except Exception as e:
+                    logging.error(f"Failed to register Enhanced PDF Processor: {e}")
+            
+            logging.info(f"Processor registry initialized with {len(self.processor_registry.list_processors())} processors")
             
         except Exception as e:
             logging.error(f"Failed to create processor registry: {e}")
@@ -166,6 +185,13 @@ class IngestionEngine:
             except Exception as fallback_e:
                 logging.error(f"All Excel processor registration attempts failed: {fallback_e}")
     
+    def _generate_consistent_doc_id(self, file_path: Path, metadata: Dict[str, Any]) -> str:
+        """Generate consistent doc_id that matches what deletion expects"""
+        # Use the same logic as in delete_file
+        if metadata.get('doc_path'):
+            return metadata['doc_path']
+        return str(file_path)
+    
     def _generate_doc_id(self, metadata: Dict[str, Any]) -> str:
         """Generate a proper document ID based on available metadata"""
         # Priority 1: Use doc_path if available (most reliable)
@@ -259,9 +285,24 @@ class IngestionEngine:
             chunking_start = datetime.now()
             if self.progress_helper:
                 with self.progress_helper.track_stage(str(file_path), ProgressStage.CHUNKING):
-                    chunks = self.chunker.chunk_text(text_content, file_metadata)
+                    # Check for processor chunks
+                    if hasattr(self, '_use_processor_chunks') and self._use_processor_chunks and hasattr(self, '_processor_chunks'):
+                        chunks = self._processor_chunks
+                        logging.info(f"Using {len(chunks)} chunks from processor")
+                        # Clean up flags
+                        self._use_processor_chunks = False
+                        self._processor_chunks = None
+                    else:
+                        chunks = self.chunker.chunk_text(text_content, file_metadata)
             else:
-                chunks = self.chunker.chunk_text(text_content, file_metadata)
+                # Same logic without progress tracking
+                if hasattr(self, '_use_processor_chunks') and self._use_processor_chunks and hasattr(self, '_processor_chunks'):
+                    chunks = self._processor_chunks
+                    logging.info(f"Using {len(chunks)} chunks from processor")
+                    self._use_processor_chunks = False
+                    self._processor_chunks = None
+                else:
+                    chunks = self.chunker.chunk_text(text_content, file_metadata)
             chunking_time = (datetime.now() - chunking_start).total_seconds()
             
             if not chunks:
@@ -271,14 +312,17 @@ class IngestionEngine:
                     'file_path': str(file_path)
                 }
             
+            # Validate chunk structure
+            validated_chunks = self._validate_chunk_structure(chunks)
+            
             # Embedding stage
             embedding_start = datetime.now()
             if self.progress_helper:
                 with self.progress_helper.track_stage(str(file_path), ProgressStage.EMBEDDING):
-                    chunk_texts = [chunk['text'] for chunk in chunks]
+                    chunk_texts = [chunk['text'] for chunk in validated_chunks]
                     embeddings = self.embedder.embed_texts(chunk_texts)
             else:
-                chunk_texts = [chunk['text'] for chunk in chunks]
+                chunk_texts = [chunk['text'] for chunk in validated_chunks]
                 embeddings = self.embedder.embed_texts(chunk_texts)
             embedding_time = (datetime.now() - embedding_start).total_seconds()
             
@@ -287,77 +331,127 @@ class IngestionEngine:
             if self.progress_helper:
                 with self.progress_helper.track_stage(str(file_path), ProgressStage.STORING):
                     chunk_metadata_list = []
-                    for i, (chunk, embedding) in enumerate(zip(chunks, embeddings)):
+                    for i, (chunk, embedding) in enumerate(zip(validated_chunks, embeddings)):
                         try:
+                            # Extract chunk metadata and ensure it's flat
+                            chunk_meta = chunk.get('metadata', {})
+                            
+                            # If chunk metadata has nested 'metadata', extract it
+                            if isinstance(chunk_meta.get('metadata'), dict):
+                                nested_meta = chunk_meta.pop('metadata')
+                                # Merge nested metadata into chunk_meta
+                                for k, v in nested_meta.items():
+                                    if k not in chunk_meta:
+                                        chunk_meta[k] = v
+                            
+                            # Create base metadata for this chunk
+                            base_chunk_metadata = {
+                                'text': chunk['text'],
+                                'content': chunk['text'],  # For compatibility
+                                'chunk_index': i,
+                                'total_chunks': len(validated_chunks),
+                                'chunk_size': len(chunk['text']),
+                                'doc_id': self._generate_consistent_doc_id(file_path, file_metadata),  # Use consistent ID
+                                'doc_path': str(file_path),  # Always include doc_path
+                                'filename': os.path.basename(file_path),
+                                'original_filename': str(file_path),
+                                'file_path': str(file_path),
+                                'chunking_method': getattr(self.chunker.__class__, '__name__', 'unknown'),
+                                'embedding_model': getattr(self.embedder, 'model_name', 'unknown')
+                            }
+                            
+                            # Merge all metadata sources using metadata manager
                             merged_metadata = self.metadata_manager.merge_metadata(
                                 file_metadata,
                                 metadata or {},
-                                chunk.get('metadata', {}),
-                                {
-                                    'text': chunk['text'],
-                                    'chunk_index': i,
-                                    'total_chunks': len(chunks),
-                                    'chunk_size': len(chunk['text']),
-                                    'chunking_method': getattr(self.chunker.__class__, '__name__', 'unknown'),
-                                    'embedding_model': getattr(self.embedder, 'model_name', 'unknown')
-                                }
+                                chunk_meta,  # Now guaranteed to be flat
+                                base_chunk_metadata
                             )
+                            
                             storage_metadata = self.metadata_manager.prepare_for_storage(merged_metadata)
                             chunk_metadata_list.append(storage_metadata)
                         except Exception as e:
                             logging.error(f"Failed to merge metadata for chunk {i}: {e}")
+                            # Fallback metadata
                             fallback_meta = {
                                 'text': chunk['text'],
                                 'chunk_index': i,
-                                'doc_id': file_metadata.get('filename', 'unknown'),
+                                'doc_id': self._generate_consistent_doc_id(file_path, file_metadata),
+                                'doc_path': str(file_path),
                                 'filename': file_metadata.get('filename'),
                                 'file_path': str(file_path),
                                 'source_type': 'file'
                             }
                             chunk_metadata_list.append(fallback_meta)
+                    
                     vector_ids = self.faiss_store.add_vectors(embeddings, chunk_metadata_list)
                     final_file_metadata = {
                         **file_metadata,
-                        'chunk_count': len(chunks),
+                        'chunk_count': len(validated_chunks),
                         'vector_ids': vector_ids,
                         'doc_id': chunk_metadata_list[0].get('doc_id', 'unknown') if chunk_metadata_list else 'unknown'
                     }
                     file_id = self.metadata_store.add_file_metadata(str(file_path), final_file_metadata)
             else:
-                # Fallback without progress tracking
+                # Fallback without progress tracking (same fix applied)
                 chunk_metadata_list = []
-                for i, (chunk, embedding) in enumerate(zip(chunks, embeddings)):
+                for i, (chunk, embedding) in enumerate(zip(validated_chunks, embeddings)):
                     try:
+                        # Extract chunk metadata and ensure it's flat
+                        chunk_meta = chunk.get('metadata', {})
+                        
+                        # If chunk metadata has nested 'metadata', extract it
+                        if isinstance(chunk_meta.get('metadata'), dict):
+                            nested_meta = chunk_meta.pop('metadata')
+                            # Merge nested metadata into chunk_meta
+                            for k, v in nested_meta.items():
+                                if k not in chunk_meta:
+                                    chunk_meta[k] = v
+                        
+                        # Create base metadata for this chunk
+                        base_chunk_metadata = {
+                            'text': chunk['text'],
+                            'content': chunk['text'],  # For compatibility
+                            'chunk_index': i,
+                            'total_chunks': len(validated_chunks),
+                            'chunk_size': len(chunk['text']),
+                            'doc_id': self._generate_consistent_doc_id(file_path, file_metadata),  # Use consistent ID
+                            'doc_path': str(file_path),  # Always include doc_path
+                            'filename': os.path.basename(file_path),
+                            'original_filename': str(file_path),
+                            'file_path': str(file_path),
+                            'chunking_method': getattr(self.chunker.__class__, '__name__', 'unknown'),
+                            'embedding_model': getattr(self.embedder, 'model_name', 'unknown')
+                        }
+                        
+                        # Merge all metadata sources using metadata manager
                         merged_metadata = self.metadata_manager.merge_metadata(
                             file_metadata,
                             metadata or {},
-                            chunk.get('metadata', {}),
-                            {
-                                'text': chunk['text'],
-                                'chunk_index': i,
-                                'total_chunks': len(chunks),
-                                'chunk_size': len(chunk['text']),
-                                'chunking_method': getattr(self.chunker.__class__, '__name__', 'unknown'),
-                                'embedding_model': getattr(self.embedder, 'model_name', 'unknown')
-                            }
+                            chunk_meta,  # Now guaranteed to be flat
+                            base_chunk_metadata
                         )
+                        
                         storage_metadata = self.metadata_manager.prepare_for_storage(merged_metadata)
                         chunk_metadata_list.append(storage_metadata)
                     except Exception as e:
                         logging.error(f"Failed to merge metadata for chunk {i}: {e}")
+                        # Fallback metadata
                         fallback_meta = {
                             'text': chunk['text'],
                             'chunk_index': i,
-                            'doc_id': file_metadata.get('filename', 'unknown'),
+                            'doc_id': self._generate_consistent_doc_id(file_path, file_metadata),
+                            'doc_path': str(file_path),
                             'filename': file_metadata.get('filename'),
                             'file_path': str(file_path),
                             'source_type': 'file'
                         }
                         chunk_metadata_list.append(fallback_meta)
+                
                 vector_ids = self.faiss_store.add_vectors(embeddings, chunk_metadata_list)
                 final_file_metadata = {
                     **file_metadata,
-                    'chunk_count': len(chunks),
+                    'chunk_count': len(validated_chunks),
                     'vector_ids': vector_ids,
                     'doc_id': chunk_metadata_list[0].get('doc_id', 'unknown') if chunk_metadata_list else 'unknown'
                 }
@@ -378,7 +472,7 @@ class IngestionEngine:
             # Complete the file if progress tracking is available
             if self.progress_tracker:
                 metrics = {
-                    'chunks_created': len(chunks),
+                    'chunks_created': len(validated_chunks),
                     'vectors_created': len(vector_ids),
                     'extraction_time': extraction_time,
                     'chunking_time': chunking_time,
@@ -387,7 +481,7 @@ class IngestionEngine:
                 }
                 self.progress_tracker.complete_file(str(file_path), metrics)
             
-            logging.info(f"Successfully ingested file: {file_path} ({len(chunks)} chunks)")
+            logging.info(f"Successfully ingested file: {file_path} ({len(validated_chunks)} chunks)")
             if old_vectors_deleted > 0:
                 logging.info(f"Replaced {old_vectors_deleted} old vectors for updated file")
             
@@ -397,7 +491,7 @@ class IngestionEngine:
                 'file_id': file_id,
                 'doc_id': doc_id,
                 'file_path': str(file_path),
-                'chunks_created': len(chunks),
+                'chunks_created': len(validated_chunks),
                 'vectors_stored': len(vector_ids),
                 'is_update': old_vectors_deleted > 0,
                 'old_vectors_deleted': old_vectors_deleted
@@ -444,19 +538,37 @@ class IngestionEngine:
             
             for i, (chunk, embedding) in enumerate(zip(chunks, embeddings)):
                 try:
+                    # Extract chunk metadata and ensure it's flat
+                    chunk_meta = chunk.get('metadata', {})
+                    
+                    # If chunk metadata has nested 'metadata', extract it
+                    if isinstance(chunk_meta.get('metadata'), dict):
+                        nested_meta = chunk_meta.pop('metadata')
+                        # Merge nested metadata into chunk_meta
+                        for k, v in nested_meta.items():
+                            if k not in chunk_meta:
+                                chunk_meta[k] = v
+                    
+                    # Create base metadata for this chunk
+                    base_chunk_metadata = {
+                        'text': chunk['text'],
+                        'content': chunk['text'],  # For compatibility
+                        'chunk_index': i,
+                        'total_chunks': len(chunks),
+                        'chunk_size': len(chunk['text']),
+                        'doc_id': metadata.get('doc_path', metadata.get('title', 'text_document')) if metadata else 'text_document',
+                        'doc_path': metadata.get('doc_path', metadata.get('title', 'text_document')) if metadata else 'text_document',
+                        'source_type': 'text',
+                        'chunking_method': getattr(self.chunker.__class__, '__name__', 'unknown'),
+                        'embedding_model': getattr(self.embedder, 'model_name', 'unknown')
+                    }
+                    
                     # Merge metadata using the metadata manager
                     merged_metadata = self.metadata_manager.merge_metadata(
                         base_metadata,           # Base metadata
                         metadata or {},          # Custom metadata from user
-                        chunk.get('metadata', {}),  # Chunk-specific metadata
-                        {                        # Final chunk data
-                            'text': chunk['text'],
-                            'chunk_index': i,
-                            'total_chunks': len(chunks),
-                            'chunk_size': len(chunk['text']),
-                            'chunking_method': getattr(self.chunker.__class__, '__name__', 'unknown'),
-                            'embedding_model': getattr(self.embedder, 'model_name', 'unknown')
-                        }
+                        chunk_meta,              # Chunk-specific metadata (now flat)
+                        base_chunk_metadata      # Final chunk data
                     )
                     
                     # Prepare for storage
@@ -469,7 +581,8 @@ class IngestionEngine:
                     fallback_meta = {
                         'text': chunk['text'],
                         'chunk_index': i,
-                        'doc_id': metadata.get('title', 'text_document') if metadata else 'text_document',
+                        'doc_id': metadata.get('doc_path', metadata.get('title', 'text_document')) if metadata else 'text_document',
+                        'doc_path': metadata.get('doc_path', metadata.get('title', 'text_document')) if metadata else 'text_document',
                         'source_type': 'text'
                     }
                     chunk_metadata_list.append(fallback_meta)
@@ -581,25 +694,36 @@ class IngestionEngine:
     def _extract_text(self, file_path: Path) -> str:
         """Extract text content from various file types"""
         file_extension = file_path.suffix.lower()
+        
+        # Reset processor flags
+        self._processor_chunks = None
+        self._use_processor_chunks = False
+        
         # Check if we have a specialized processor
         processor = self.processor_registry.get_processor(str(file_path))
         if processor:
             try:
                 result = processor.process(str(file_path), getattr(self, '_current_metadata', {}))
-                if result['status'] == 'success':
-                    chunk_texts = [chunk['text'] for chunk in result.get('chunks', [])]
-                    combined_text = '\n\n'.join(chunk_texts)
+                
+                if result.get('status') == 'success' and result.get('chunks'):
+                    # Store processor chunks to use directly
+                    self._processor_chunks = result['chunks']
+                    self._use_processor_chunks = True
+                    
+                    # Update metadata
                     if hasattr(self, '_current_metadata') and self._current_metadata:
                         self._current_metadata.update({
                             'processor_used': processor.__class__.__name__,
-                            'embedded_objects': len(result.get('embedded_objects', [])),
-                            'images_processed': len(result.get('images', [])),
-                            'charts_found': len(result.get('charts', []))
+                            'processor_chunk_count': len(result['chunks']),
+                            **{k: v for k, v in result.items() if k not in ['chunks', 'status', 'text']}
                         })
-                    return combined_text
+                    
+                    # Return dummy text to satisfy the flow
+                    return "[Processed by specialized processor]"
             except Exception as e:
                 logging.error(f"Processor failed for {file_path}: {e}")
-                # Fall back to default extraction
+        
+        # Default extraction methods
         try:
             if file_extension == '.txt':
                 return self._extract_text_file(file_path)
@@ -774,3 +898,34 @@ class IngestionEngine:
         stats['active_vectors'] = faiss_info.get('active_vectors', 0)
         
         return stats
+    
+    def _validate_chunk_structure(self, chunks: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Validate and fix chunk structure before processing"""
+        validated_chunks = []
+        
+        for i, chunk in enumerate(chunks):
+            if not isinstance(chunk, dict):
+                logging.error(f"Invalid chunk type at index {i}: {type(chunk)}")
+                continue
+            
+            # Ensure required fields
+            if 'text' not in chunk:
+                logging.error(f"Chunk {i} missing 'text' field")
+                continue
+            
+            # Ensure metadata is not double-nested
+            metadata = chunk.get('metadata', {})
+            if isinstance(metadata.get('metadata'), dict):
+                logging.warning(f"Found double-nested metadata in chunk {i}, flattening")
+                nested = metadata.pop('metadata')
+                metadata.update(nested)
+            
+            validated_chunk = {
+                'text': chunk['text'],
+                'chunk_index': chunk.get('chunk_index', i),
+                'metadata': metadata
+            }
+            
+            validated_chunks.append(validated_chunk)
+        
+        return validated_chunks

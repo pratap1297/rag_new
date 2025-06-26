@@ -37,6 +37,25 @@ class EnhancedPDFProcessor(BaseProcessor):
         """Check if file can be processed by this processor"""
         return Path(file_path).suffix.lower() in self.supported_extensions
         
+    def _process_image_with_azure(self, image_data: bytes) -> Dict[str, Any]:
+        """Process image with Azure CV with proper error handling"""
+        if not self.azure_client:
+            return {'text': '[Azure CV not available]', 'error': 'No Azure client'}
+        try:
+            result = self.azure_client.process_image(image_data, image_type='document')
+            if result.get('success'):
+                return {
+                    'text': result.get('text', ''),
+                    'regions': result.get('regions', []),
+                    'confidence': result.get('confidence', 0.0)
+                }
+            else:
+                self.logger.warning(f"Azure CV processing failed: {result.get('error')}")
+                return {'text': '[OCR failed]', 'error': result.get('error')}
+        except Exception as e:
+            self.logger.error(f"Azure CV exception: {e}")
+            return {'text': '[OCR error]', 'error': str(e)}
+
     def process(self, file_path: str, metadata: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """Process PDF with full text, image, and metadata extraction"""
         
@@ -101,21 +120,15 @@ class EnhancedPDFProcessor(BaseProcessor):
                 xref = img[0]
                 image_data = self._extract_image(pdf_document, xref)
                 
-                if image_data and self.azure_client:
-                    # OCR the image
-                    ocr_result = self.azure_client.process_image(
-                        image_data,
-                        image_type='document'
-                    )
-                    
-                    if ocr_result['success']:
+                if image_data:
+                    ocr_result = self._process_image_with_azure(image_data)
+                    if ocr_result.get('text') and not ocr_result.get('error'):
                         page_data['images'].append({
                             'image_index': img_index,
                             'page': page_num + 1,
                             'ocr_text': ocr_result['text'],
-                            'regions': ocr_result['regions']
+                            'regions': ocr_result.get('regions', [])
                         })
-                        
                         # Add OCR text to page text
                         page_data['text'] += f"\n[Image {img_index}]: {ocr_result['text']}"
             
@@ -237,29 +250,24 @@ class EnhancedPDFProcessor(BaseProcessor):
         """Create chunks with flat metadata structure compatible with metadata manager"""
         chunks = []
         
-        for page_data in processed_data['pages']:
+        for page_num, page_data in enumerate(processed_data['pages']):
             # Chunk page text
             page_text = page_data['text']
             
             # Add image OCR text context
             if page_data['images']:
-                image_context = "\n".join([
-                    f"[Image content: {img['ocr_text'][:100]}...]" 
-                    for img in page_data['images']
-                ])
-                page_text += f"\n\nImages found on page:\n{image_context}"
+                for img in page_data['images']:
+                    if img.get('ocr_text'):
+                        page_text += f"\n\n[Image on page {page_num + 1}]: {img['ocr_text']}"
             
             # Add table context
             if page_data['tables']:
-                table_context = "\n".join([
-                    f"[Table with {len(table['data'])} rows]"
-                    for table in page_data['tables']
-                ])
-                page_text += f"\n\nTables found on page:\n{table_context}"
+                for table_idx, table in enumerate(page_data['tables']):
+                    page_text += f"\n\n[Table {table_idx + 1} on page {page_num + 1}]:\n{table.get('text', '')}"
             
             # Create chunk with flat metadata structure
             chunk = {
-                'text': page_text,
+                'text': page_text.strip(),
                 'metadata': {
                     'source_type': 'pdf',
                     'content_type': 'page_content',
@@ -268,12 +276,13 @@ class EnhancedPDFProcessor(BaseProcessor):
                     'image_count': len(page_data['images']),
                     'has_tables': len(page_data['tables']) > 0,
                     'table_count': len(page_data['tables']),
-                    'has_annotations': len(page_data['annotations']) > 0,
-                    'annotation_count': len(page_data['annotations']),
-                    'extraction_method': 'enhanced_with_ocr',
+                    'has_annotations': len(page_data.get('annotations', [])) > 0,
+                    'annotation_count': len(page_data.get('annotations', [])),
+                    'extraction_method': 'azure_computer_vision',
                     'pdf_title': processed_data['metadata'].get('title', ''),
                     'pdf_author': processed_data['metadata'].get('author', ''),
-                    'pdf_page_count': processed_data['metadata'].get('page_count', 0)
+                    'pdf_page_count': processed_data['metadata'].get('page_count', 0),
+                    'processor': 'enhanced_pdf'
                 }
             }
             
