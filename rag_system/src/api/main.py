@@ -2,7 +2,7 @@
 FastAPI Application
 Main API application for the RAG system
 """
-from fastapi import FastAPI, HTTPException, Depends, UploadFile, File, BackgroundTasks, WebSocket
+from fastapi import FastAPI, HTTPException, Depends, UploadFile, File, BackgroundTasks, WebSocket, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from typing import Dict, Any, Optional, List
@@ -10,6 +10,7 @@ import logging
 import asyncio
 import time
 from datetime import datetime
+from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 import atexit
 
@@ -105,6 +106,107 @@ except ImportError:
         from .enhanced_folder_endpoints import router as enhanced_folder_router
     except ImportError:
         enhanced_folder_router = None
+
+# Enhanced file upload handler with original path preservation
+class FileUploadHandler:
+    """Enhanced file upload handler that preserves original file path information"""
+    
+    def __init__(self, ingestion_engine, file_registry=None):
+        self.ingestion_engine = ingestion_engine
+        self.file_registry = file_registry or {}
+        
+    async def upload_and_ingest(
+        self,
+        file: UploadFile,
+        original_path: Optional[str] = None,
+        additional_metadata: Optional[dict] = None,
+        upload_source: str = "web_upload"
+    ) -> Dict[str, Any]:
+        """Upload file and ingest while preserving original path information"""
+        
+        # Create temporary file
+        import tempfile
+        import shutil
+        
+        with tempfile.NamedTemporaryFile(delete=False, suffix=Path(file.filename).suffix) as tmp_file:
+            # Copy uploaded content
+            shutil.copyfileobj(file.file, tmp_file)
+            temp_path = tmp_file.name
+        
+        try:
+            # Prepare metadata with original file information
+            metadata = {
+                'original_filename': original_path or file.filename,  # Full path or just filename
+                'original_name': Path(file.filename).name,  # Just the filename
+                'display_name': Path(file.filename).stem,  # Filename without extension
+                'file_extension': Path(file.filename).suffix,
+                'content_type': file.content_type,
+                'upload_timestamp': datetime.now().isoformat(),
+                'upload_source': upload_source,
+                'temp_path': temp_path,  # Store temp path for reference
+                'file_size': file.size if hasattr(file, 'size') else 0
+            }
+            
+            # Add any additional metadata
+            if additional_metadata:
+                metadata.update(additional_metadata)
+            
+            # Register file mapping if registry is available
+            if self.file_registry is not None:
+                self.file_registry[temp_path] = {
+                    'original_path': original_path or file.filename,
+                    'upload_time': metadata['upload_timestamp']
+                }
+            
+            # Ingest file with metadata
+            result = self.ingestion_engine.ingest_file(temp_path, metadata)
+            
+            # Add original path info to result
+            result['original_path'] = original_path or file.filename
+            result['temp_path'] = temp_path
+            
+            return {
+                'success': True,
+                'message': f'File "{Path(file.filename).name}" ingested successfully',
+                'file_id': result.get('file_id'),
+                'doc_id': result.get('doc_id'),
+                'original_path': original_path or file.filename,
+                'chunks_created': result.get('chunks_created', 0),
+                'upload_metadata': metadata
+            }
+            
+        except Exception as e:
+            # Clean up temp file on error
+            Path(temp_path).unlink(missing_ok=True)
+            raise e
+        
+    def format_search_result(self, source: dict) -> dict:
+        """Format search result to show original file information"""
+        # Try to get original file info from various metadata fields
+        original_path = (
+            source.get('original_filename') or 
+            source.get('original_path') or
+            source.get('filename') or
+            source.get('file_path', '')
+        )
+        
+        # Extract just the filename for display
+        display_name = Path(original_path).name
+        
+        # Check if this is a temp file
+        is_temp = 'Temp' in original_path or 'tmp' in original_path.lower()
+        
+        return {
+            'doc_id': source.get('doc_id'),
+            'display_name': display_name,
+            'original_path': original_path if not is_temp else source.get('original_name', display_name),
+            'score': source.get('similarity_score', 0),
+            'content': source.get('text', ''),
+            'metadata': {
+                k: v for k, v in source.items() 
+                if k not in ['text', 'content', 'embedding', 'vector']
+            }
+        }
 
 def create_api_app(container, monitoring=None, heartbeat_monitor_instance=None, folder_monitor_instance=None, enhanced_folder_monitor_instance=None) -> FastAPI:
     """Create and configure FastAPI application with resource management"""
@@ -546,7 +648,7 @@ Answer:"""
         return await _process_text_ingestion_async(text, metadata)
     
     async def _process_file_upload_async(file_content: bytes, filename: str, metadata: Dict[str, Any]) -> Dict[str, Any]:
-        """Process file upload asynchronously with timeout"""
+        """Process file upload asynchronously with enhanced original path preservation"""
         def _process_file():
             try:
                 import tempfile
@@ -561,12 +663,31 @@ Answer:"""
                     # Get ingestion engine
                     ingestion_engine = container.get('ingestion_engine')
                     
-                    # Ensure original filename is preserved in metadata
-                    if 'original_filename' not in metadata:
-                        metadata['original_filename'] = filename
+                    # Enhanced metadata preservation
+                    enhanced_metadata = metadata.copy()
                     
-                    # Process file
-                    result = ingestion_engine.ingest_file(tmp_file_path, metadata)
+                    # Ensure original filename is preserved in metadata
+                    if 'original_filename' not in enhanced_metadata:
+                        enhanced_metadata['original_filename'] = filename
+                    
+                    # Set temp path for reference
+                    enhanced_metadata['temp_path'] = tmp_file_path
+                    
+                    # Add processing metadata
+                    enhanced_metadata.update({
+                        'processing_timestamp': datetime.now().isoformat(),
+                        'file_processing_method': 'api_upload',
+                        'original_file_size': len(file_content)
+                    })
+                    
+                    # Process file with enhanced metadata
+                    result = ingestion_engine.ingest_file(tmp_file_path, enhanced_metadata)
+                    
+                    # Add original path info to result
+                    result['original_path'] = enhanced_metadata.get('original_filename', filename)
+                    result['temp_path'] = tmp_file_path
+                    result['upload_metadata'] = enhanced_metadata
+                    
                     return result
                     
                 finally:
@@ -600,9 +721,12 @@ Answer:"""
     @app.post("/upload", response_model=UploadResponse)
     async def upload_file(
         file: UploadFile = File(...),
-        metadata: Optional[str] = None
+        metadata: Optional[str] = None,
+        original_path: Optional[str] = Form(None),
+        description: Optional[str] = Form(None),
+        upload_source: Optional[str] = Form("web_upload")
     ):
-        """Upload and process a file"""
+        """Upload and process a file with enhanced original path preservation"""
         try:
             # Read file content
             file_content = await file.read()
@@ -616,16 +740,26 @@ Answer:"""
                 except json.JSONDecodeError:
                     file_metadata = {"description": metadata}
             
-            # Add file info to metadata
+            # Enhanced metadata with original path preservation
             file_metadata.update({
                 "filename": file.filename,
-                "original_filename": file.filename,  # Add original filename for source labels
+                "original_filename": original_path or file.filename,  # Full original path or filename
+                "original_name": file.filename,  # Just the filename
+                "display_name": Path(file.filename).stem,  # Filename without extension
+                "file_extension": Path(file.filename).suffix,
                 "content_type": file.content_type,
-                "file_size": len(file_content)
+                "file_size": len(file_content),
+                "upload_timestamp": datetime.now().isoformat(),
+                "upload_source": upload_source or "web_upload",
+                "temp_path": None  # Will be set during processing
             })
             
+            # Add optional description
+            if description:
+                file_metadata["description"] = description
+            
             # Debug: Log the metadata being passed
-            logging.info(f"Upload metadata being passed to ingestion: {file_metadata}")
+            logging.info(f"Enhanced upload metadata being passed to ingestion: {file_metadata}")
             
             # Process file
             result = await _process_file_upload_async(file_content, file.filename, file_metadata)
@@ -646,6 +780,69 @@ Answer:"""
         except Exception as e:
             logging.error(f"File upload error: {e}")
             raise HTTPException(status_code=500, detail=f"File upload failed: {str(e)}")
+    
+    # Enhanced file upload endpoint with better original path preservation
+    @app.post("/upload/enhanced", response_model=UploadResponse)
+    async def upload_file_enhanced(
+        file: UploadFile = File(...),
+        original_path: Optional[str] = Form(None),
+        description: Optional[str] = Form(None),
+        upload_source: Optional[str] = Form("web_upload"),
+        additional_metadata: Optional[str] = Form(None)
+    ):
+        """
+        Enhanced file upload endpoint with better original path preservation.
+        
+        - **file**: The file to upload
+        - **original_path**: The original file path (optional)
+        - **description**: Additional description (optional)
+        - **upload_source**: Source of the upload (default: web_upload)
+        - **additional_metadata**: JSON string with additional metadata (optional)
+        """
+        try:
+            # Get ingestion engine
+            ingestion_engine = container.get('ingestion_engine')
+            
+            # Parse additional metadata if provided
+            additional_meta = {}
+            if additional_metadata:
+                import json
+                try:
+                    additional_meta = json.loads(additional_metadata)
+                except json.JSONDecodeError:
+                    additional_meta = {"description": additional_metadata}
+            
+            # Add description to additional metadata if provided
+            if description:
+                additional_meta["description"] = description
+            
+            # Create upload handler
+            handler = FileUploadHandler(ingestion_engine)
+            
+            # Process file with enhanced handler
+            result = await handler.upload_and_ingest(
+                file=file,
+                original_path=original_path,
+                additional_metadata=additional_meta,
+                upload_source=upload_source
+            )
+            
+            return UploadResponse(
+                status="success" if result.get("success") else "error",
+                file_id=result.get("file_id"),
+                file_path=result.get("original_path"),  # Use original path instead of temp path
+                chunks_created=result.get("chunks_created", 0),
+                vectors_stored=result.get("vectors_stored"),
+                reason=result.get("reason"),
+                is_update=result.get("is_update"),
+                old_vectors_deleted=result.get("old_vectors_deleted")
+            )
+            
+        except HTTPException:
+            raise
+        except Exception as e:
+            logging.error(f"Enhanced file upload error: {e}")
+            raise HTTPException(status_code=500, detail=f"Enhanced file upload failed: {str(e)}")
     
     # Detailed health check endpoint
     @app.get("/health/detailed")

@@ -4530,34 +4530,42 @@ def create_fixed_interface():
                 
                 # Import ServiceNow UI components
                 try:
-                    import sys
-                    import os
-                    
-                    # Get the current working directory and build paths
-                    current_dir = os.getcwd()
-                    rag_system_path = os.path.join(current_dir, 'rag_system')
-                    rag_system_src = os.path.join(current_dir, 'rag_system', 'src')
-                    
-                    # Add paths to sys.path if not already there
-                    if rag_system_path not in sys.path:
-                        sys.path.insert(0, rag_system_path)
-                    if rag_system_src not in sys.path:
-                        sys.path.insert(0, rag_system_src)
-                    
-                    # Import the ServiceNow UI module
-                    from src.api.servicenow_ui import ServiceNowUI
-                    servicenow_ui = ServiceNowUI()
-                    servicenow_available = True
-                    print("[OK] ServiceNow UI imported and initialized successfully!")
-                    
-                except ImportError as e:
-                    print(f"[ERROR] ServiceNow UI import failed: {e}")
-                    print(f"   Current working directory: {os.getcwd()}")
-                    print(f"   Looking for module at: {os.path.join(os.getcwd(), 'rag_system', 'src', 'api', 'servicenow_ui.py')}")
-                    print(f"   File exists: {os.path.exists(os.path.join(os.getcwd(), 'rag_system', 'src', 'api', 'servicenow_ui.py'))}")
+                    # Use a more robust import strategy without dynamic path manipulation
                     servicenow_available = False
+                    
+                    # Try multiple import strategies
+                    import_strategies = [
+                        # Strategy 1: Direct import if module is in Python path
+                        lambda: __import__('src.api.servicenow_ui', fromlist=['ServiceNowUI']),
+                        # Strategy 2: Try relative import from current package
+                        lambda: __import__('rag_system.src.api.servicenow_ui', fromlist=['ServiceNowUI']),
+                        # Strategy 3: Try importing from ServiceNow-Int directory
+                        lambda: __import__('ServiceNow-Int.servicenow_ui', fromlist=['ServiceNowUI'])
+                    ]
+                    
+                    ServiceNowUI = None
+                    for i, strategy in enumerate(import_strategies, 1):
+                        try:
+                            module = strategy()
+                            if hasattr(module, 'ServiceNowUI'):
+                                ServiceNowUI = module.ServiceNowUI
+                                print(f"[OK] ServiceNow UI imported successfully using strategy {i}")
+                                break
+                        except (ImportError, AttributeError) as e:
+                            print(f"[DEBUG] Import strategy {i} failed: {e}")
+                            continue
+                    
+                    if ServiceNowUI is not None:
+                        servicenow_ui = ServiceNowUI()
+                        servicenow_available = True
+                        print("[OK] ServiceNow UI initialized successfully!")
+                    else:
+                        print("[WARNING] ServiceNow UI module not found in any expected location")
+                        servicenow_available = False
+                    
                 except Exception as e:
                     print(f"[ERROR] ServiceNow UI initialization failed: {e}")
+                    print(f"   Current working directory: {os.getcwd()}")
                     servicenow_available = False
                 
                 if servicenow_available:
@@ -6291,14 +6299,97 @@ def create_fixed_interface():
             outputs=[file_status_display]
         )
         
-        # Auto-refresh functionality - DISABLED BY DEFAULT to prevent infinite loops
-        auto_refresh_timer = gr.Timer(30, active=False)  # 30 second timer, DISABLED by default
+        # Auto-refresh functionality with performance safeguards
+        # Increased interval to 60 seconds and added safety mechanisms
+        auto_refresh_timer = gr.Timer(60, active=False)  # 60 second timer, DISABLED by default
+        
+        # Performance tracking variables
+        auto_refresh_state = {
+            'last_refresh_time': 0,
+            'consecutive_failures': 0,
+            'max_failures': 3,
+            'min_interval': 30,  # Minimum 30 seconds between refreshes
+            'is_refreshing': False
+        }
         
         def toggle_auto_refresh(enabled):
+            """Toggle auto-refresh with safety checks"""
             if enabled:
+                # Reset failure counter when enabling
+                auto_refresh_state['consecutive_failures'] = 0
+                auto_refresh_state['last_refresh_time'] = 0
+                print("[INFO] Auto-refresh enabled with safety mechanisms")
                 return gr.update(active=True)
             else:
+                print("[INFO] Auto-refresh disabled")
                 return gr.update(active=False)
+        
+        def safe_refresh_all_monitoring_info():
+            """Safely refresh all monitoring information with performance safeguards"""
+            import time
+            current_time = time.time()
+            
+            # Check if we're already refreshing
+            if auto_refresh_state['is_refreshing']:
+                print("[WARNING] Auto-refresh skipped - previous refresh still in progress")
+                return None, None, None, None
+            
+            # Check minimum interval
+            if current_time - auto_refresh_state['last_refresh_time'] < auto_refresh_state['min_interval']:
+                print("[WARNING] Auto-refresh skipped - too soon since last refresh")
+                return None, None, None, None
+            
+            # Check failure threshold
+            if auto_refresh_state['consecutive_failures'] >= auto_refresh_state['max_failures']:
+                print(f"[WARNING] Auto-refresh disabled due to {auto_refresh_state['consecutive_failures']} consecutive failures")
+                # Disable the timer
+                auto_refresh_timer.update(active=False)
+                return None, None, None, None
+            
+            try:
+                # Set refreshing flag
+                auto_refresh_state['is_refreshing'] = True
+                auto_refresh_state['last_refresh_time'] = current_time
+                
+                print("[DEBUG] Starting auto-refresh cycle")
+                
+                # Perform the refresh with timeout protection
+                status = ui.get_monitoring_status()
+                file_status = ui.get_detailed_file_status()
+                registry = ui._format_document_registry()
+                dropdown_choices = ui.get_document_paths()
+                
+                # Ensure dropdown_choices is a proper list of strings
+                if not isinstance(dropdown_choices, list):
+                    dropdown_choices = ["(No documents uploaded yet)"]
+                
+                safe_choices = [str(choice) for choice in dropdown_choices if choice is not None]
+                if not safe_choices:
+                    safe_choices = ["(No documents uploaded yet)"]
+                
+                # Reset failure counter on success
+                auto_refresh_state['consecutive_failures'] = 0
+                print("[DEBUG] Auto-refresh completed successfully")
+                
+                return status, file_status, registry, gr.update(choices=safe_choices, value=None)
+                
+            except Exception as e:
+                # Increment failure counter
+                auto_refresh_state['consecutive_failures'] += 1
+                print(f"[ERROR] Auto-refresh failed (attempt {auto_refresh_state['consecutive_failures']}): {str(e)}")
+                
+                # If we've hit the failure threshold, disable auto-refresh
+                if auto_refresh_state['consecutive_failures'] >= auto_refresh_state['max_failures']:
+                    print(f"[CRITICAL] Auto-refresh disabled after {auto_refresh_state['max_failures']} consecutive failures")
+                    # Return None to indicate no update needed
+                    return None, None, None, None
+                
+                # Return current values to avoid breaking the UI
+                return None, None, None, None
+                
+            finally:
+                # Always clear the refreshing flag
+                auto_refresh_state['is_refreshing'] = False
         
         auto_refresh_checkbox.change(
             fn=toggle_auto_refresh,
@@ -6307,7 +6398,7 @@ def create_fixed_interface():
         )
         
         auto_refresh_timer.tick(
-            fn=refresh_all_monitoring_info,
+            fn=safe_refresh_all_monitoring_info,
             outputs=[monitor_status_display, file_status_display, document_registry_display, delete_doc_path_input]
         )
         

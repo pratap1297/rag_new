@@ -7,6 +7,7 @@ from typing import Dict, List, Any, Optional, Set, Tuple
 from datetime import datetime
 from collections import defaultdict, Counter
 import math
+from pathlib import Path
 
 try:
     from ..core.error_handling import RetrievalError
@@ -314,11 +315,12 @@ Answer:"""
             return "I apologize, but I'm unable to generate a response at the moment due to a technical issue."
     
     def _get_source_label(self, source: Dict[str, Any], fallback_index: int) -> str:
-        """Get the best available source label for a source"""
-        # FIXED: Access fields directly, not through nested metadata
-        # Priority order for source labels
+        """Get the best available source label for a source with enhanced original path handling"""
+        # Enhanced priority order for source labels with better original path handling
         source_options = [
-            source.get('original_filename'),  # Full original filename with path
+            source.get('original_filename'),  # Full original filename with path (highest priority)
+            source.get('original_name'),      # Just the original filename
+            source.get('display_name'),       # Display name without extension
             source.get('file_path'),          # Full file path
             source.get('filename'),           # Filename from source
             source.get('source'),             # Source field
@@ -348,12 +350,31 @@ Answer:"""
     # ... rest of the existing methods remain the same ...
     
     def _format_sources(self, sources: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """Format sources for response"""
+        """Format sources for response with enhanced original path information"""
         formatted_sources = []
         
         for i, source in enumerate(sources):
             # Get the best source label
             source_label = self._get_source_label(source, i + 1)
+            
+            # Extract original path information
+            original_path = (
+                source.get('original_filename') or 
+                source.get('original_path') or
+                source.get('file_path') or
+                source.get('filename', '')
+            )
+            
+            # Determine if this is a temp file
+            is_temp_file = (
+                'Temp' in original_path or 
+                'tmp' in original_path.lower() or
+                '/tmp/' in original_path or
+                '\\temp\\' in original_path.lower()
+            )
+            
+            # Get display name
+            display_name = source.get('display_name') or Path(original_path).stem if original_path else f"Source {i + 1}"
             
             formatted_source = {
                 'text': source.get('text', '')[:200] + "..." if len(source.get('text', '')) > 200 else source.get('text', ''),
@@ -366,8 +387,13 @@ Answer:"""
                 'chunk_id': source.get('chunk_id', 'unknown'),
                 'source_label': source_label,
                 'original_filename': source.get('original_filename'),
+                'original_name': source.get('original_name'),
+                'display_name': display_name,
                 'file_path': source.get('file_path'),
-                'filename': source.get('filename')
+                'filename': source.get('filename'),
+                'is_temp_file': is_temp_file,
+                'upload_source': source.get('upload_source', 'unknown'),
+                'upload_timestamp': source.get('upload_timestamp')
             }
             formatted_sources.append(formatted_source)
         

@@ -75,6 +75,13 @@ class PersistentJSONMetadataStore:
         
         return file_id
     
+    def find_by_hash(self, doc_hash: str) -> Optional[Dict[str, Any]]:
+        """Find file metadata by document hash for deduplication"""
+        for file_id, file_metadata in self._files_cache.items():
+            if file_metadata.get('doc_hash') == doc_hash:
+                return file_metadata
+        return None
+    
     def add_chunk_metadata(self, chunk_data: Dict[str, Any]) -> str:
         """Add chunk metadata with vector linking"""
         chunk_id = chunk_data.get('chunk_id') or str(uuid.uuid4())

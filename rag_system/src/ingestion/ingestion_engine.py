@@ -4,6 +4,7 @@ Main engine for processing and ingesting documents
 """
 import logging
 import mimetypes
+import hashlib
 from pathlib import Path
 from typing import Dict, List, Any, Optional
 from datetime import datetime
@@ -227,6 +228,21 @@ class IngestionEngine:
         import uuid
         return f"docs_{uuid.uuid4().hex[:8]}"
     
+    def _calculate_document_hash(self, file_path: Path) -> str:
+        """Calculate hash of document content for deduplication"""
+        hasher = hashlib.sha256()
+        with open(file_path, 'rb') as f:
+            for chunk in iter(lambda: f.read(4096), b""):
+                hasher.update(chunk)
+        return hasher.hexdigest()
+
+    def check_duplicate(self, file_path: str) -> Optional[str]:
+        """Check if document already exists"""
+        doc_hash = self._calculate_document_hash(Path(file_path))
+        # Check in metadata store
+        existing = self.metadata_store.find_by_hash(doc_hash)
+        return existing.get('file_id') if existing else None
+    
     def ingest_file(self, file_path: str, metadata: Dict[str, Any] = None) -> Dict[str, Any]:
         """Ingest a single file with progress tracking"""
         file_path = Path(file_path)
@@ -248,6 +264,17 @@ class IngestionEngine:
                 # Fallback without progress tracking
                 if file_path.stat().st_size > self.config.ingestion.max_file_size_mb * 1024 * 1024:
                     raise FileProcessingError(f"File too large: {file_path}")
+            
+            # Check for duplicate document
+            duplicate_file_id = self.check_duplicate(str(file_path))
+            if duplicate_file_id:
+                logging.info(f"Duplicate document detected: {file_path} (existing: {duplicate_file_id})")
+                return {
+                    'status': 'skipped',
+                    'reason': 'duplicate',
+                    'file_path': str(file_path),
+                    'duplicate_file_id': duplicate_file_id
+                }
             
             self._current_metadata = metadata or {}
             old_vectors_deleted = self._handle_existing_file(str(file_path))
@@ -278,7 +305,8 @@ class IngestionEngine:
                 'ingested_at': datetime.now().isoformat(),
                 'processor': 'ingestion_engine',
                 'is_update': old_vectors_deleted > 0,
-                'replaced_vectors': old_vectors_deleted
+                'replaced_vectors': old_vectors_deleted,
+                'doc_hash': self._calculate_document_hash(file_path)
             }
             
             # Chunking stage
@@ -929,3 +957,33 @@ class IngestionEngine:
             validated_chunks.append(validated_chunk)
         
         return validated_chunks
+
+    def ingest_file_stream(self, file_path: str, chunk_callback=None):
+        """Process large files in streaming fashion"""
+        with open(file_path, 'r', encoding='utf-8') as f:
+            buffer = ""
+            while True:
+                chunk = f.read(1024 * 1024)  # 1MB chunks
+                if not chunk:
+                    break
+                buffer += chunk
+                sentences, buffer = self._extract_complete_sentences(buffer)
+                if sentences and chunk_callback:
+                    chunk_callback(sentences)
+            # Process any remaining sentences in the buffer
+            if buffer.strip() and chunk_callback:
+                chunk_callback([buffer.strip()])
+
+    def _extract_complete_sentences(self, buffer: str):
+        """Extract complete sentences from buffer, leaving incomplete at the end"""
+        import re
+        # This regex splits on sentence-ending punctuation followed by whitespace or end of string
+        sentence_endings = re.compile(r'([.!?][\"\']?)(?=\s|$)')
+        sentences = []
+        last_end = 0
+        for match in sentence_endings.finditer(buffer):
+            end = match.end()
+            sentences.append(buffer[last_end:end].strip())
+            last_end = end
+        remainder = buffer[last_end:]
+        return [s for s in sentences if s], remainder
