@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 """
-Enhanced Git Auto-Commit Script for Python Files
+Enhanced Git Auto-Commit Script for Python Files - Fixed Version
 """
 
 import subprocess
@@ -21,7 +22,7 @@ class GitAutoCommit:
         elif self.verbose:
             print(f"📍 {message}")
     
-    def run_git_command(self, command: List[str]) -> Tuple[bool, str]:
+    def run_git_command(self, command: List[str], timeout: int = 30) -> Tuple[bool, str]:
         """Run a git command and return success status and output"""
         try:
             self.log(f"Running: git {' '.join(command)}")
@@ -30,11 +31,11 @@ class GitAutoCommit:
                 capture_output=True,
                 text=True,
                 check=True,
-                timeout=60  # Add timeout to prevent hanging
+                timeout=timeout
             )
             return True, result.stdout.strip()
         except subprocess.TimeoutExpired:
-            return False, "Command timed out after 60 seconds"
+            return False, f"Command timed out after {timeout} seconds"
         except subprocess.CalledProcessError as e:
             return False, e.stderr.strip()
         except Exception as e:
@@ -69,18 +70,6 @@ class GitAutoCommit:
         
         return changed_files
     
-    def show_diff(self, file: str):
-        """Show diff for a file"""
-        success, output = self.run_git_command(['diff', file])
-        if success and output:
-            print(f"\n📄 Diff for {file}:")
-            print(output)
-        else:
-            success, output = self.run_git_command(['diff', '--cached', file])
-            if success and output:
-                print(f"\n📄 Staged diff for {file}:")
-                print(output)
-    
     def add_files(self, files: List[str]) -> bool:
         """Add files to git staging area"""
         if not files:
@@ -95,7 +84,7 @@ class GitAutoCommit:
         return True
     
     def commit_changes(self, message: str) -> bool:
-        """Commit staged changes"""
+        """Commit staged changes with better error handling"""
         # First check if there are any staged changes
         success, output = self.run_git_command(['diff', '--cached', '--name-only'])
         if not success:
@@ -106,7 +95,8 @@ class GitAutoCommit:
             print("⚠️  No staged changes to commit")
             return True
         
-        success, output = self.run_git_command(['commit', '-m', message])
+        # Commit with timeout
+        success, output = self.run_git_command(['commit', '-m', message], timeout=60)
         if not success:
             self.log(f"Error committing changes: {output}", is_error=True)
             return False
@@ -123,7 +113,7 @@ class GitAutoCommit:
         if branch:
             cmd.extend(['origin', branch])
         
-        success, output = self.run_git_command(cmd)
+        success, output = self.run_git_command(cmd, timeout=120)
         if not success:
             self.log(f"Error pushing changes: {output}", is_error=True)
             return False
@@ -140,7 +130,6 @@ class GitAutoCommit:
         """Generate automatic commit message based on changed files"""
         if len(files) == 1:
             file = files[0]
-            # Extract meaningful parts from file path
             parts = file.split('/')
             if 'src' in parts:
                 idx = parts.index('src')
@@ -149,7 +138,6 @@ class GitAutoCommit:
                 return f"update: {module} - {parts[-1]}"
             return f"update: {file}"
         else:
-            # Group files by directory
             dirs = set()
             for file in files:
                 dir_path = os.path.dirname(file)
@@ -165,18 +153,17 @@ class GitAutoCommit:
 
 def main():
     """Main function"""
-    parser = argparse.ArgumentParser(description='Git Auto-Commit Script for Python Files')
+    parser = argparse.ArgumentParser(description='Git Auto-Commit Script - Fixed Version')
     parser.add_argument('-m', '--message', help='Commit message')
     parser.add_argument('-p', '--push', action='store_true', help='Push after commit')
     parser.add_argument('-f', '--force-push', action='store_true', help='Force push')
     parser.add_argument('-a', '--all', action='store_true', help='Include all file types, not just .py')
-    parser.add_argument('-d', '--diff', action='store_true', help='Show diff before committing')
     parser.add_argument('-v', '--verbose', action='store_true', help='Verbose output')
     parser.add_argument('--no-untracked', action='store_true', help='Ignore untracked files')
     
     args = parser.parse_args()
     
-    print("🔍 Git Auto-Commit Script")
+    print("🔍 Git Auto-Commit Script - Fixed Version")
     print("-" * 50)
     
     # Check if we're in a git repository
@@ -198,11 +185,6 @@ def main():
     print(f"\n📋 Found {len(changed_files)} changed file(s):")
     for i, file in enumerate(changed_files, 1):
         print(f"   {i}. {file}")
-    
-    # Show diffs if requested
-    if args.diff:
-        for file in changed_files:
-            git.show_diff(file)
     
     # Ask for confirmation
     print(f"\n❓ Commit these {len(changed_files)} file(s)? (y/n): ", end="")
@@ -245,7 +227,9 @@ def main():
     if args.push or args.force_push:
         current_branch = git.get_current_branch()
         print(f"\n📤 Pushing to branch: {current_branch}")
-        git.push_changes(current_branch, args.force_push)
+        if not git.push_changes(current_branch, args.force_push):
+            print("❌ Failed to push changes.")
+            return
     else:
         print("\n💡 Tip: Use -p flag to auto-push changes")
     
@@ -253,22 +237,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
-# # Basic usage - commit all changed .py files
-# python git_commit_py.py
-
-# # Commit with custom message and push
-# python git_commit_py.py -m "feat: add conversation context support" -p
-
-# # Show diffs before committing
-# python git_commit_py.py -d
-
-# # Commit all files (not just .py)
-# python git_commit_py.py -a
-
-# # Verbose mode
-# python git_commit_py.py -v
-
-# # Exclude untracked files
-# python git_commit_py.py --no-untracked
