@@ -80,8 +80,15 @@ class ConversationGraph:
             }
         )
         
-        # From respond, end the conversation (don't loop back)
-        workflow.add_edge("respond", END)
+        # From respond, conditionally end or continue the conversation
+        workflow.add_conditional_edges(
+            "respond",
+            self._route_conversation_end,
+            {
+                "continue": "understand",
+                "end": END
+            }
+        )
         
         # From clarify, go back to understand for next turn
         workflow.add_edge("clarify", "understand")
@@ -106,15 +113,26 @@ class ConversationGraph:
             
             self.logger.info(f"Routing after understanding - intent: {user_intent}, turn: {turn_count}")
             
+            # Check if this is a goodbye message
             if user_intent == "goodbye":
                 return "end"
+                
+            # For greetings and help, go directly to respond
             elif user_intent in ["greeting", "help"]:
                 return "respond"
-            elif user_intent == "information_seeking":
+                
+            # For information seeking or any query that might need knowledge retrieval
+            elif user_intent in ["information_seeking", "question", "search", "explanation"]:
                 return "search"
+                
+            # For follow-up questions, always search to maintain context
+            elif user_intent == "follow_up" or state.get('is_contextual', False):
+                return "search"
+                
+            # Default to search for most intents to provide knowledge-based responses
             else:
-                # For questions about specific topics, route to search
-                return "search"  # Changed from "respond" to "search"
+                return "search"
+                
         except Exception as e:
             self.logger.error(f"Error in routing after understanding: {e}")
             return "respond"
@@ -142,17 +160,28 @@ class ConversationGraph:
         try:
             current_phase = state.get('current_phase', ConversationPhase.UNDERSTANDING)
             user_intent = state.get('user_intent', None)
+            turn_count = state.get('turn_count', 0)
             
-            # Only end if explicitly in ending phase or goodbye intent
+            # End conversation if:
+            # 1. Explicitly in ending phase or goodbye intent
+            # 2. Too many turns (to prevent infinite loops)
+            # 3. Error count is too high
+            # 4. Single-turn question has been answered (for API calls)
             if (current_phase == ConversationPhase.ENDING or 
-                user_intent == "goodbye"):
+                user_intent == "goodbye" or
+                turn_count > 20 or  # Limit total turns to prevent loops
+                state.get('retry_count', 0) > 3 or  # Too many retries
+                len(state.get('error_messages', [])) > 5 or  # Too many errors
+                current_phase == ConversationPhase.RESPONDING):  # End after response is generated
+                
+                self.logger.info(f"Ending conversation: phase={current_phase}, intent={user_intent}, turns={turn_count}")
                 return "end"
             else:
                 return "continue"
         except Exception as e:
             self.logger.error(f"Error in routing conversation end: {e}")
-            # Default to continuing conversation on error
-            return "continue"
+            # Default to ending conversation on error to prevent loops
+            return "end"
     
     def process_message(self, thread_id: str, user_message: str, config: Dict[str, Any] = None) -> ConversationState:
         """Process a user message through the conversation graph using LangGraph state management"""
@@ -162,6 +191,8 @@ class ConversationGraph:
             if config is None:
                 config = {}
             config["configurable"] = {"thread_id": thread_id}
+            # Set recursion limit to prevent infinite loops
+            config["recursion_limit"] = 100
             
             # Get current state from checkpointer or create new one
             current_state = self._get_or_create_state(thread_id)
@@ -179,7 +210,9 @@ class ConversationGraph:
             # Apply memory management to prevent leaks
             result = _apply_memory_management(result)
             
-            self.logger.info(f"Conversation processed successfully for thread {thread_id}, phase: {result['current_phase']}")
+            # Safely access current_phase with a default value if it doesn't exist
+            current_phase = result.get('current_phase', 'UNKNOWN')
+            self.logger.info(f"Conversation processed successfully for thread {thread_id}, phase: {current_phase}")
             return result
             
         except Exception as e:
@@ -272,9 +305,28 @@ class ConversationGraph:
         
         try:
             # Get all stored threads from checkpointer
-            # Note: This is a simplified implementation - actual implementation may vary
-            # based on SqliteSaver's internal structure
-            return []  # Placeholder - would need to query the SQLite database directly
+            if not self.checkpointer or not hasattr(self.checkpointer, 'client'):
+                self.logger.warning("Checkpointer not available or missing client attribute")
+                return []
+                
+            # Try to access the SQLite database directly
+            try:
+                # This assumes SQLiteSaver is being used
+                conn = self.checkpointer.client.conn
+                cursor = conn.cursor()
+                
+                # Query for unique thread_ids in the configurable column
+                cursor.execute("SELECT DISTINCT json_extract(configurable, '$.thread_id') FROM checkpoints")
+                thread_ids = [row[0] for row in cursor.fetchall() if row[0]]
+                
+                self.logger.info(f"Found {len(thread_ids)} conversation threads in database")
+                return thread_ids
+                
+            except Exception as db_error:
+                self.logger.error(f"Database query error: {db_error}")
+                # Fallback to empty list if database query fails
+                return []
+                
         except Exception as e:
             self.logger.error(f"Error listing conversation threads: {e}")
-            return [] 
+            return []

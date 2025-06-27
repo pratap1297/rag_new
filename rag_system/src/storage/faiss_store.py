@@ -316,7 +316,7 @@ class OptimizedFAISSIndex:
 class FAISSStore:
     """Thread-safe FAISS-based vector store for similarity search with optimization"""
     
-    def __init__(self, index_path: str = "data/vectors/index.faiss", dimension: int = 384):
+    def __init__(self, index_path: str = "data/vectors/index.faiss", dimension: int = 1024):  # Updated to match Azure Cohere-embed-v3-english dimension
         self.index_path = Path(index_path)
         self.dimension = dimension
         self.metadata_path = self.index_path.parent / "vector_metadata.pkl"

@@ -328,11 +328,20 @@ class ConversationNodes:
             # Add response to conversation
             new_state = add_message_to_state(new_state, MessageType.ASSISTANT, response)
             
-            # Generate follow-up questions and related topics
-            self.logger.info("🚀 About to call _generate_follow_up_questions method")
-            new_state['suggested_questions'] = self._generate_follow_up_questions(state)
-            self.logger.info(f"🎯 Generated {len(new_state['suggested_questions'])} suggested questions")
-            new_state['related_topics'] = self._extract_related_topics(state)
+            # Set the conversation phase to RESPONDING to indicate we've generated a response
+            new_state['current_phase'] = ConversationPhase.RESPONDING
+            
+            # Only generate follow-up questions and related topics occasionally to reduce LLM calls
+            # Use turn count to determine when to generate suggestions (every 3 turns)
+            if state.get('turn_count', 0) % 3 == 0:
+                self.logger.info("🚀 Generating follow-up questions")
+                new_state['suggested_questions'] = self._generate_follow_up_questions(state)
+                self.logger.info(f"🎯 Generated {len(new_state['suggested_questions'])} suggested questions")
+                new_state['related_topics'] = self._extract_related_topics(state)
+            else:
+                # Reuse previous suggestions if available
+                new_state['suggested_questions'] = state.get('suggested_questions', [])
+                new_state['related_topics'] = state.get('related_topics', [])
             
             # Set response confidence
             new_state['response_confidence'] = 0.8 if state.get('search_results') else 0.6
@@ -408,6 +417,12 @@ class ConversationNodes:
         # Check if query is very short and likely refers to previous context
         if len(query.split()) <= 4 and state['turn_count'] > 1:
             self.logger.info("Short query detected with conversation history - treating as contextual")
+            return True
+            
+        # If we have previous messages, always consider some level of context
+        if state.get('messages') and len(state.get('messages', [])) > 2:
+            self.logger.info("Conversation has history - treating with partial context")
+            # Not fully contextual but we'll maintain some conversation awareness
             return True
         
         return False
@@ -703,6 +718,19 @@ Could you provide more details about what specifically you'd like to know? This 
         
         self.logger.info("🔥 FOLLOW-UP QUESTIONS METHOD CALLED 🔥")
         
+        # Check if we should skip LLM generation to reduce API calls
+        # Only generate new questions every few turns or when we have new search results
+        turn_count = state.get('turn_count', 0)
+        has_new_search_results = len(state.get('search_results', [])) > 0
+        
+        # If we have previous suggestions and it's not time to refresh, reuse them
+        if (state.get('suggested_questions') and 
+            len(state.get('suggested_questions', [])) >= 2 and 
+            turn_count % 3 != 0 and 
+            not has_new_search_results):
+            self.logger.info("Reusing existing suggested questions to reduce LLM calls")
+            return state.get('suggested_questions')
+        
         try:
             self.logger.info("Starting follow-up question generation")
             
@@ -710,8 +738,6 @@ Could you provide more details about what specifically you'd like to know? This 
             if not self.llm_client:
                 self.logger.warning("No LLM client available, using fallback questions")
                 return self._generate_fallback_follow_up_questions(state)
-            
-            self.logger.info("LLM client is available, proceeding with enhanced suggestions")
             
             # Get context from search results and conversation
             context_info = self._build_suggestion_context(state)
@@ -722,30 +748,27 @@ Could you provide more details about what specifically you'd like to know? This 
                 return self._generate_fallback_follow_up_questions(state)
             
             # Create a focused prompt for generating relevant follow-up questions
-            prompt = f"""Based on the user's question and the information found, generate 4-5 intelligent follow-up questions that would be genuinely helpful.
+            prompt = f"""Based on the user's question and the information found, generate 3-4 intelligent follow-up questions that would be genuinely helpful.
 
 User's Question: "{state.get('original_query', '')}"
 
 Information Found:
-{context_info}
+{context_info[:1000]}
 
 Generate follow-up questions that:
 1. Explore specific details mentioned in the information
 2. Ask about practical applications or next steps
 3. Clarify relationships between entities/concepts
-4. Seek additional context or specifications
-5. Explore related but not fully covered aspects
 
 Make the questions specific, actionable, and based on the actual content found. Avoid generic questions.
 
 Format as a simple list:
 - Question 1
 - Question 2
-- Question 3
-- Question 4"""
+- Question 3"""
 
             self.logger.info("Sending prompt to LLM for follow-up questions")
-            response = self.llm_client.generate(prompt, max_tokens=300, temperature=0.7)
+            response = self.llm_client.generate(prompt, max_tokens=200, temperature=0.7)
             self.logger.info(f"LLM response length: {len(response)}")
             
             # Parse the questions from the response
@@ -761,7 +784,6 @@ Format as a simple list:
                 
         except Exception as e:
             self.logger.error(f"Error generating follow-up questions: {e}")
-            self.logger.exception("Full exception details:")
             return self._generate_fallback_follow_up_questions(state)
     
     def _extract_related_topics(self, state: ConversationState) -> List[str]:

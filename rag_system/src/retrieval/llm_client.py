@@ -21,7 +21,13 @@ class BaseLLMClient(ABC):
         pass
 
 class GroqClient(BaseLLMClient):
-    """Groq LLM client"""
+    """Groq LLM client with rate limiting"""
+    
+    # Class-level rate limiting variables
+    last_request_time = 0
+    min_request_interval = 1.0  # Minimum time between requests in seconds
+    request_count = 0
+    max_requests_per_minute = 50  # Maximum requests per minute
     
     def __init__(self, api_key: str, model_name: str = "mixtral-8x7b-32768", timeout: int = 30):
         self.api_key = api_key
@@ -42,8 +48,34 @@ class GroqClient(BaseLLMClient):
         except Exception as e:
             raise APIKeyError("groq")
     
+    def _apply_rate_limiting(self):
+        """Apply rate limiting to avoid hitting API limits"""
+        current_time = time.time()
+        
+        # Check if we need to wait between requests
+        time_since_last_request = current_time - GroqClient.last_request_time
+        if time_since_last_request < GroqClient.min_request_interval:
+            # Wait to maintain minimum interval between requests
+            sleep_time = GroqClient.min_request_interval - time_since_last_request
+            logging.debug(f"Rate limiting: Sleeping for {sleep_time:.2f} seconds")
+            time.sleep(sleep_time)
+        
+        # Update request count and check rate limits
+        GroqClient.request_count += 1
+        if GroqClient.request_count >= GroqClient.max_requests_per_minute:
+            # If we've hit the rate limit, wait until the next minute
+            logging.warning(f"Rate limit approaching: {GroqClient.request_count} requests. Slowing down.")
+            time.sleep(2.0)  # Add extra delay when approaching limits
+            GroqClient.request_count = 0  # Reset counter
+        
+        # Update last request time
+        GroqClient.last_request_time = time.time()
+    
     def generate(self, prompt: str, max_tokens: int = 1000, temperature: float = 0.1) -> str:
         try:
+            # Apply rate limiting before making the request
+            self._apply_rate_limiting()
+            
             start_time = time.time()
             response = self.client.chat.completions.create(
                 model=self.model_name,

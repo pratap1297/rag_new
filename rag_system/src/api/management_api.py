@@ -526,5 +526,40 @@ def create_management_router(container) -> APIRouter:
         except Exception as e:
             logging.error(f"Error getting detailed stats: {e}")
             raise HTTPException(status_code=500, detail=f"Failed to get detailed stats: {str(e)}")
-    
-    return router 
+
+    @router.post("/verify/file", summary="Verify single file ingestion")
+    async def verify_file_ingestion(file_path: str = Body(..., description="Path to the file to verify")):
+        """Verify the complete ingestion pipeline for a single file"""
+        try:
+            verifier = container.get('ingestion_verifier')
+            result = verifier.verify_file_ingestion(file_path)
+            return result.to_dict()
+        except FileNotFoundError as e:
+            raise HTTPException(status_code=404, detail=str(e))
+        except Exception as e:
+            logging.error(f"Error verifying file ingestion: {e}")
+            raise HTTPException(status_code=500, detail=f"Failed to verify file: {str(e)}")
+
+    @router.post("/verify/comprehensive", summary="Run comprehensive ingestion test")
+    async def run_comprehensive_test(test_files: List[str] = Body(..., description="List of file paths to test")):
+        """Run a comprehensive ingestion test on multiple files"""
+        try:
+            verifier = container.get('ingestion_verifier')
+            results = verifier.run_comprehensive_test(test_files)
+            return results
+        except Exception as e:
+            logging.error(f"Error running comprehensive test: {e}")
+            raise HTTPException(status_code=500, detail=f"Failed to run comprehensive test: {str(e)}")
+
+    @router.post("/debug/trace", summary="Trace file ingestion")
+    async def trace_file_ingestion(file_path: str = Body(..., description="Path to the file to trace")):
+        """Trace the ingestion process for a single file"""
+        try:
+            debugger = container.get('ingestion_debugger')
+            trace = debugger.trace_ingestion(file_path, save_trace=True)
+            return trace
+        except Exception as e:
+            logging.error(f"Error tracing file ingestion: {e}")
+            raise HTTPException(status_code=500, detail=f"Failed to trace file: {str(e)}")
+
+    return router

@@ -325,6 +325,36 @@ class QueryEnhancer:
             if combined not in query:
                 expansions.append(f"What is {combined}?")
         
+        
+        # Person query enhancement - ADDED FOR SARAH JOHNSON FIX
+        person_query_patterns = [
+            r'\b(who is|who are)\s+([A-Z][a-z]+\s+[A-Z][a-z]+)\b',
+            r'\b(tell me about|information about)\s+([A-Z][a-z]+\s+[A-Z][a-z]+)\b',
+            r'\b([A-Z][a-z]+\s+[A-Z][a-z]+)\s+(manager|employee|staff|person)\b'
+        ]
+        
+        import re
+        for pattern in person_query_patterns:
+            match = re.search(pattern, query, re.IGNORECASE)
+            if match:
+                if len(match.groups()) >= 2:
+                    person_name = match.group(2)
+                else:
+                    person_name = match.group(1)
+                
+                # Add expanded queries for person searches
+                expansions.extend([
+                    f"{person_name} employee",
+                    f"{person_name} manager",
+                    f"{person_name} staff",
+                    f"{person_name} contact",
+                    f"{person_name} information",
+                    f"employee {person_name}",
+                    f"manager {person_name}",
+                    f"contact information {person_name}"
+                ])
+                break
+
         return expansions[:self.max_expansions]
     
     def _reformulate_query(self, query: str, intent: QueryIntent) -> List[str]:

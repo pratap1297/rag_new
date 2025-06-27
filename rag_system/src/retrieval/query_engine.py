@@ -239,7 +239,7 @@ class QueryEngine:
             return response_data
             
         except Exception as e:
-            raise RetrievalError(f"Query processing failed: {e}", query=query)
+            raise RetrievalError(f"Query processing failed: {e}", details={'query': query})
     
     def _generate_llm_response(self, query: str, sources: List[Dict[str, Any]], 
                               conversation_context: Optional[Dict[str, Any]] = None) -> str:

@@ -445,6 +445,24 @@ def create_conversation_manager(container: DependencyContainer):
         print(f"     ❌ Failed to create conversation manager: {e}")
         return None
 
+def create_ingestion_verifier(container: DependencyContainer):
+    """Factory for IngestionVerifier"""
+    from .ingestion_verification_system import IngestionVerifier
+    return IngestionVerifier(
+        ingestion_engine=container.get('ingestion_engine'),
+        query_engine=container.get('query_engine'),
+        faiss_store=container.get('faiss_store')
+    )
+
+def create_ingestion_debugger(container: DependencyContainer):
+    """Factory for IngestionDebugger"""
+    from .ingestion_debug_tools import IngestionDebugger
+    return IngestionDebugger(
+        ingestion_engine=container.get('ingestion_engine'),
+        faiss_store=container.get('faiss_store'),
+        metadata_store=container.get('metadata_store')
+    )
+
 def register_core_services(container: DependencyContainer):
     """Register all core services"""
     container.register('config_manager', create_config_manager)
@@ -462,6 +480,8 @@ def register_core_services(container: DependencyContainer):
     container.register('verified_ingestion_engine', create_verified_ingestion_engine)
     container.register('servicenow_integration', create_servicenow_integration)
     container.register('conversation_manager', create_conversation_manager)
+    container.register('ingestion_verifier', create_ingestion_verifier)
+    container.register('ingestion_debugger', create_ingestion_debugger)
 
 # Global container instance for API access
 _global_container = None
@@ -476,4 +496,4 @@ def get_dependency_container() -> DependencyContainer:
 def set_dependency_container(container: DependencyContainer):
     """Set the global dependency container"""
     global _global_container
-    _global_container = container 
+    _global_container = container
