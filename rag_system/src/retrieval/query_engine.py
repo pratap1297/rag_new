@@ -366,12 +366,14 @@ Answer:"""
             )
             
             # Determine if this is a temp file
-            is_temp_file = (
-                'Temp' in original_path or 
-                'tmp' in original_path.lower() or
-                '/tmp/' in original_path or
-                '\\temp\\' in original_path.lower()
-            )
+            is_temp_file = False
+            if original_path:
+                is_temp_file = (
+                    'Temp' in original_path or 
+                    'tmp' in original_path.lower() or
+                    '/tmp/' in original_path or
+                    '\\temp\\' in original_path.lower()
+                )
             
             # Get display name
             display_name = source.get('display_name') or Path(original_path).stem if original_path else f"Source {i + 1}"

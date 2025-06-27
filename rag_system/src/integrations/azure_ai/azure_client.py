@@ -39,13 +39,21 @@ class AzureAIClient:
         self.logger = logging.getLogger(__name__)
         self.config = config or {}
         
-        # Computer Vision settings
-        self.cv_endpoint = self.config.get('computer_vision_endpoint') or os.getenv('AZURE_CV_ENDPOINT')
-        self.cv_key = self.config.get('computer_vision_key') or os.getenv('AZURE_CV_KEY')
+        # Computer Vision settings - support multiple env var names
+        self.cv_endpoint = (self.config.get('computer_vision_endpoint') or 
+                           os.getenv('AZURE_COMPUTER_VISION_ENDPOINT') or 
+                           os.getenv('AZURE_CV_ENDPOINT'))
+        self.cv_key = (self.config.get('computer_vision_key') or 
+                      os.getenv('AZURE_COMPUTER_VISION_KEY') or 
+                      os.getenv('AZURE_CV_KEY'))
         
-        # Document Intelligence settings (optional)
-        self.di_endpoint = self.config.get('document_intelligence_endpoint') or os.getenv('AZURE_DI_ENDPOINT')
-        self.di_key = self.config.get('document_intelligence_key') or os.getenv('AZURE_DI_KEY')
+        # Document Intelligence settings (optional) - support multiple env var names
+        self.di_endpoint = (self.config.get('document_intelligence_endpoint') or 
+                           os.getenv('AZURE_DOCUMENT_INTELLIGENCE_ENDPOINT') or 
+                           os.getenv('AZURE_DI_ENDPOINT'))
+        self.di_key = (self.config.get('document_intelligence_key') or 
+                      os.getenv('AZURE_DOCUMENT_INTELLIGENCE_KEY') or 
+                      os.getenv('AZURE_DI_KEY'))
         
         # Settings
         self.max_image_size_mb = self.config.get('max_image_size_mb', 4)

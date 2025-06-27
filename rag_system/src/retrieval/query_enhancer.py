@@ -235,6 +235,9 @@ class QueryEnhancer:
     
     def _extract_keywords(self, query: str) -> List[str]:
         """Extract important keywords from the query"""
+        if not query or not isinstance(query, str):
+            return []
+            
         # Remove stop words and extract meaningful terms
         stop_words = {
             'the', 'a', 'an', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for', 
@@ -245,12 +248,13 @@ class QueryEnhancer:
         
         # Tokenize and filter
         words = re.findall(r'\b\w+\b', query.lower())
-        keywords = [word for word in words if word not in stop_words and len(word) > 2]
+        keywords = [word for word in words if word and word not in stop_words and len(word) > 2]
         
         # Extract phrases (2-3 word combinations)
         phrases = []
         for i in range(len(words) - 1):
-            if words[i] not in stop_words and words[i+1] not in stop_words:
+            if (words[i] and words[i+1] and 
+                words[i] not in stop_words and words[i+1] not in stop_words):
                 phrase = f"{words[i]} {words[i+1]}"
                 if len(phrase) > 5:  # Avoid very short phrases
                     phrases.append(phrase)
@@ -302,9 +306,13 @@ class QueryEnhancer:
         """Generate expanded versions of the query"""
         expansions = []
         
+        # Ensure keywords is not None and contains valid strings
+        if not keywords:
+            keywords = []
+        
         # Synonym-based expansion
         for keyword in keywords[:3]:  # Limit to top 3 keywords
-            if keyword in self.synonym_map:
+            if keyword and isinstance(keyword, str) and keyword in self.synonym_map:
                 for synonym in self.synonym_map[keyword][:2]:  # Max 2 synonyms per keyword
                     expanded = query.replace(keyword, synonym)
                     if expanded != query and expanded not in expansions:
@@ -314,13 +322,13 @@ class QueryEnhancer:
         if intent.query_type in self.expansion_templates:
             templates = self.expansion_templates[intent.query_type]
             for template in templates[:2]:  # Max 2 templates
-                if '{topic}' in template and keywords:
+                if '{topic}' in template and keywords and keywords[0]:
                     expanded = template.format(topic=keywords[0])
                     if expanded not in expansions:
                         expansions.append(expanded)
         
         # Keyword combination expansion
-        if len(keywords) >= 2:
+        if len(keywords) >= 2 and keywords[0] and keywords[1]:
             combined = f"{keywords[0]} {keywords[1]}"
             if combined not in query:
                 expansions.append(f"What is {combined}?")
@@ -342,17 +350,18 @@ class QueryEnhancer:
                 else:
                     person_name = match.group(1)
                 
-                # Add expanded queries for person searches
-                expansions.extend([
-                    f"{person_name} employee",
-                    f"{person_name} manager",
-                    f"{person_name} staff",
-                    f"{person_name} contact",
-                    f"{person_name} information",
-                    f"employee {person_name}",
-                    f"manager {person_name}",
-                    f"contact information {person_name}"
-                ])
+                if person_name:  # Ensure we have a valid person name
+                    # Add expanded queries for person searches
+                    expansions.extend([
+                        f"{person_name} employee",
+                        f"{person_name} manager",
+                        f"{person_name} staff",
+                        f"{person_name} contact",
+                        f"{person_name} information",
+                        f"employee {person_name}",
+                        f"manager {person_name}",
+                        f"contact information {person_name}"
+                    ])
                 break
 
         return expansions[:self.max_expansions]

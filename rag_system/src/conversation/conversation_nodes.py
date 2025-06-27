@@ -158,8 +158,6 @@ class ConversationNodes:
             return new_state
 
         try:
-            search_result = None
-            
             # Create conversation context with bypass threshold for conversation queries
             conversation_context = {
                 'bypass_threshold': True,  # Bypass similarity threshold for conversation consistency
@@ -255,7 +253,8 @@ class ConversationNodes:
                     new_state['relevant_sources'] = sources
                     
                     # Store the query engine response if available
-                    new_state['query_engine_response'] = search_result.get('response', '')
+                    response = search_result.get('response', '')
+                    new_state['query_engine_response'] = response if isinstance(response, str) else ''
                     
                     self.logger.info(f"Found {len(search_results)} relevant sources")
                 else:
@@ -263,7 +262,8 @@ class ConversationNodes:
                     self.logger.info("No sources found in search result")
                     new_state['search_results'] = []
                     new_state['context_chunks'] = []
-                    new_state['query_engine_response'] = search_result.get('response', '')
+                    response = search_result.get('response', '')
+                    new_state['query_engine_response'] = response if isinstance(response, str) else ''
                 
                 new_state['current_phase'] = ConversationPhase.RESPONDING
             else:
@@ -508,9 +508,10 @@ class ConversationNodes:
         """Generate response based on search results and context"""
         
         # First check if we have a response from the query engine
-        if state.get('query_engine_response') and state['query_engine_response'].strip():
+        query_engine_response = state.get('query_engine_response')
+        if query_engine_response and isinstance(query_engine_response, str) and query_engine_response.strip():
             self.logger.info("Using query engine response directly")
-            return state['query_engine_response']
+            return query_engine_response
         
         # Check if this is a contextual query that needs conversation awareness
         if state.get('is_contextual', False):
@@ -524,7 +525,7 @@ class ConversationNodes:
                 # Enhanced search results context with source information
                 context_parts = []
                 for i, result in enumerate(state['search_results'][:3], 1):
-                    content = result['content'][:400]
+                    content = result.get('content', '')[:400] if result.get('content') else ''
                     source = result.get('source', 'Unknown')
                     score = result.get('score', 0)
                     
@@ -532,11 +533,12 @@ class ConversationNodes:
                 
                 context_text = "\n\n".join(context_parts)
                 
+                original_query = state.get('original_query', '')
                 prompt = f"""You are having a conversation with a user. Here is the recent conversation:
 
 {conversation_context}
 
-The user's latest question is: "{state['original_query']}"
+The user's latest question is: "{original_query}"
 
 Based on the following information from the knowledge base, provide a helpful response:
 
@@ -661,10 +663,11 @@ Please provide a clear, informative response based on the context provided."""
         topic = state.get('current_topic', 'that topic')
         
         # Check what the user is asking for
-        if 'tell me more' in state['original_query'].lower():
+        original_query = state.get('original_query', '')
+        if original_query and 'tell me more' in original_query.lower():
             return f"I've shared the information I have about {topic} from the knowledge base. I don't have additional details beyond what was already provided. Is there something specific about {topic} you'd like to know more about?"
         else:
-            return f"I couldn't find additional information about {state['original_query']} in the knowledge base. Could you please be more specific about what aspect you'd like to know?"
+            return f"I couldn't find additional information about {original_query} in the knowledge base. Could you please be more specific about what aspect you'd like to know?"
     
     def _generate_greeting_response(self, state: ConversationState) -> str:
         """Generate greeting response"""
