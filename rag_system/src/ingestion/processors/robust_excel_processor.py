@@ -116,7 +116,8 @@ class RobustExcelProcessor(BaseProcessor):
         file_path = Path(file_path)
         
         self.logger.info(f"📊 Starting Excel processing: {file_path}")
-        self.logger.info(f"📊 File size: {file_path.stat().st_size:,} bytes")
+        self.logger.info(f"📊 File type: EXCEL | File size: {file_path.stat().st_size:,} bytes")
+        self.logger.info(f"📊 Processor: RobustExcelProcessor")
         
         # Validate file
         validation_result = self._validate_file(file_path)
@@ -261,11 +262,44 @@ class RobustExcelProcessor(BaseProcessor):
                 self.logger.info(f"  - Charts: {sheet_result.get('charts_processed', 0)}")
                 self.logger.info(f"  - Processing time: {sheet_processing_time:.2f}s")
                 
+                # ADD DETAILED CONTENT LOGGING like PDF processor
                 if self.logger.isEnabledFor(logging.DEBUG):
                     self.logger.debug(f"  - Dimensions: {sheet_result.get('metadata', {}).get('dimensions', 'Unknown')}")
                     self.logger.debug(f"  - Has merged cells: {sheet_result.get('metadata', {}).get('has_merged_cells', False)}")
                     self.logger.debug(f"  - Text preview: {sheet_result['text'][:200]}..." if len(sheet_result['text']) > 200 else f"  - Text: {sheet_result['text']}")
+                    
+                    # Log sample cell values for debugging
+                    if 'sample_cells' in sheet_result.get('metadata', {}):
+                        sample_cells = sheet_result['metadata']['sample_cells']
+                        self.logger.debug(f"  - Sample cells: {sample_cells}")
+                    
+                    # Log formulas if any
+                    if 'formula_count' in sheet_result.get('metadata', {}):
+                        formula_count = sheet_result['metadata']['formula_count']
+                        self.logger.debug(f"  - Formulas found: {formula_count}")
+                        
+                    # Log data types detected
+                    if 'data_types' in sheet_result.get('metadata', {}):
+                        data_types = sheet_result['metadata']['data_types']
+                        self.logger.debug(f"  - Data types: {data_types}")
                 
+                # ADD LOGGING: For table-like structures
+                if 'tables' in sheet_result and sheet_result['tables']:
+                    for table_idx, table in enumerate(sheet_result['tables']):
+                        self.logger.info(f"  - Table {table_idx + 1}: {table.get('rows', 0)} rows, {table.get('cols', 0)} cols")
+                        if self.logger.isEnabledFor(logging.DEBUG):
+                            self.logger.debug(f"    Table preview: {table.get('text', '')[:100]}...")
+                
+                # ADD LOGGING: For image OCR results
+                if 'images' in sheet_result and sheet_result['images']:
+                    for img_idx, img in enumerate(sheet_result['images']):
+                        if img.get('ocr_text'):
+                            self.logger.info(f"  - Image {img_idx + 1} OCR: {len(img['ocr_text'])} chars extracted")
+                            if self.logger.isEnabledFor(logging.DEBUG):
+                                self.logger.debug(f"    OCR Text Preview: {img['ocr_text'][:200]}...")
+                        else:
+                            self.logger.debug(f"  - Image {img_idx + 1}: No OCR text extracted")
+
                 result['sheets'].append(sheet_result)
                 result['text'] += f"\n\n--- Sheet: {sheet_name} ---\n"
                 result['text'] += sheet_result['text']

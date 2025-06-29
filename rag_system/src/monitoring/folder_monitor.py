@@ -46,6 +46,7 @@ class FolderMonitor:
         
         # Monitoring state
         self.is_running = False
+        self.is_paused = False  # Add pause state
         self.monitor_thread = None
         self.file_states: Dict[str, FileState] = {}
         self.monitored_folders: List[str] = []
@@ -190,6 +191,7 @@ class FolderMonitor:
             return {"success": False, "error": "Monitoring is not running"}
         
         self.is_running = False
+        self.is_paused = False  # Reset pause state when stopping
         
         # Wait for thread to finish
         if self.monitor_thread and self.monitor_thread.is_alive():
@@ -198,11 +200,22 @@ class FolderMonitor:
         self.logger.info("Stopped folder monitoring")
         return {"success": True, "message": "Folder monitoring stopped"}
     
+    def pause_monitoring(self):
+        """Pause monitoring without stopping"""
+        self.is_paused = True
+        self.logger.info("Monitoring paused")
+
+    def resume_monitoring(self):
+        """Resume monitoring"""
+        self.is_paused = False
+        self.logger.info("Monitoring resumed")
+    
     def get_status(self) -> Dict[str, Any]:
         """Get monitoring status"""
         with self._lock:
             return {
                 "is_running": self.is_running,
+                "is_paused": self.is_paused,
                 "monitored_folders": self.monitored_folders.copy(),
                 "total_files_tracked": len(self.file_states),
                 "files_ingested": len([f for f in self.file_states.values() if f.ingestion_status == "success"]),
@@ -221,9 +234,11 @@ class FolderMonitor:
         
         while self.is_running:
             try:
-                self._scan_all_folders()
-                self.stats['scan_count'] = self.stats.get('scan_count', 0) + 1
-                self.stats['last_scan_time'] = datetime.now().isoformat()
+                # Skip scanning if monitoring is paused
+                if not self.is_paused:
+                    self._scan_all_folders()
+                    self.stats['scan_count'] = self.stats.get('scan_count', 0) + 1
+                    self.stats['last_scan_time'] = datetime.now().isoformat()
                 
                 # Sleep in small intervals to allow quick shutdown
                 for _ in range(self.check_interval):

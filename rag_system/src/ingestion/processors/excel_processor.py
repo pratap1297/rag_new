@@ -97,7 +97,9 @@ class ExcelProcessor(BaseProcessor):
         if not file_path.exists():
             raise FileNotFoundError(f"File not found: {file_path}")
         
-        self.logger.info(f"Processing Excel file: {file_path}")
+        self.logger.info(f"📊 Starting Excel processing: {file_path}")
+        self.logger.info(f"📊 File type: EXCEL | File size: {file_path.stat().st_size:,} bytes")
+        self.logger.info(f"📊 Processor: ExcelProcessor")
         
         try:
             # Initialize result structure
