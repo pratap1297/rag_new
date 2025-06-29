@@ -96,7 +96,7 @@ class FolderMonitoringConfig:
         if self.monitored_folders is None:
             self.monitored_folders = []
         if self.supported_extensions is None:
-            self.supported_extensions = [".txt", ".md", ".pdf", ".docx", ".json", ".csv"]
+            self.supported_extensions = [".txt", ".md", ".pdf", ".docx", ".doc", ".json", ".csv", ".xlsx", ".xls", ".xlsm", ".xlsb", ".jpg", ".jpeg", ".png", ".gif", ".bmp", ".tiff", ".tif", ".webp", ".svg"]
 
 @dataclass
 class AzureAIConfig:
@@ -141,7 +141,7 @@ class SystemConfig:
             self.api.cors_origins = ["*"] if self.debug else []
         if self.ingestion is None:
             self.ingestion = IngestionConfig()
-            self.ingestion.supported_formats = [".pdf", ".docx", ".txt", ".md"]
+            self.ingestion.supported_formats = [".pdf", ".docx", ".doc", ".txt", ".md", ".json", ".csv", ".xlsx", ".xls", ".xlsm", ".xlsb", ".jpg", ".jpeg", ".png", ".gif", ".bmp", ".tiff", ".tif", ".webp", ".svg"]
         if self.retrieval is None:
             self.retrieval = RetrievalConfig()
         if self.monitoring is None:
@@ -256,15 +256,22 @@ class ConfigManager:
         if os.getenv('RAG_LOG_LEVEL'):
             self.config.monitoring.log_level = os.getenv('RAG_LOG_LEVEL')
         
-        # Azure AI config
-        if os.getenv('AZURE_CV_ENDPOINT'):
-            self.config.azure_ai.computer_vision_endpoint = os.getenv('AZURE_CV_ENDPOINT')
-        if os.getenv('AZURE_CV_KEY'):
-            self.config.azure_ai.computer_vision_key = os.getenv('AZURE_CV_KEY')
-        if os.getenv('AZURE_DI_ENDPOINT'):
-            self.config.azure_ai.document_intelligence_endpoint = os.getenv('AZURE_DI_ENDPOINT')
-        if os.getenv('AZURE_DI_KEY'):
-            self.config.azure_ai.document_intelligence_key = os.getenv('AZURE_DI_KEY')
+        # Azure AI config - check both short and long environment variable names
+        cv_endpoint = os.getenv('AZURE_CV_ENDPOINT') or os.getenv('AZURE_COMPUTER_VISION_ENDPOINT')
+        if cv_endpoint:
+            self.config.azure_ai.computer_vision_endpoint = cv_endpoint
+            
+        cv_key = os.getenv('AZURE_CV_KEY') or os.getenv('AZURE_COMPUTER_VISION_KEY')
+        if cv_key:
+            self.config.azure_ai.computer_vision_key = cv_key
+            
+        di_endpoint = os.getenv('AZURE_DI_ENDPOINT') or os.getenv('AZURE_DOCUMENT_INTELLIGENCE_ENDPOINT')
+        if di_endpoint:
+            self.config.azure_ai.document_intelligence_endpoint = di_endpoint
+            
+        di_key = os.getenv('AZURE_DI_KEY') or os.getenv('AZURE_DOCUMENT_INTELLIGENCE_KEY')
+        if di_key:
+            self.config.azure_ai.document_intelligence_key = di_key
     
     def get_config(self, component: Optional[str] = None) -> Any:
         """Get configuration for specific component or entire config"""

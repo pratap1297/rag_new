@@ -315,7 +315,7 @@ class FixedRAGUI:
         except Exception as e:
             return f"❌ **Connection Error:** {str(e)}\n🌐 Backend URL: {self.api_url}"
 
-    def upload_and_refresh(self, file, doc_path) -> Tuple[str, str, List[str]]:
+    def upload_and_refresh(self, file, doc_path, original_filename_override=None) -> Tuple[str, str, List[str]]:
         """Upload file and refresh dropdowns"""
         print(f"DEBUG: upload_and_refresh called with file: {file}, doc_path: {doc_path}")
         
@@ -324,26 +324,67 @@ class FixedRAGUI:
             return "Please select a file to upload.", registry_display, []
         
         try:
-            # Use doc_path if provided, otherwise generate from filename
+            # Extract original filename from Gradio file object
+            original_filename = None
+            temp_file_path = file.name if hasattr(file, 'name') else str(file)
+            
+            # Debug: Print all available attributes of the file object
+            print(f"DEBUG: File object type: {type(file)}")
+            print(f"DEBUG: File object attributes: {dir(file)}")
+            if hasattr(file, '__dict__'):
+                print(f"DEBUG: File object dict: {file.__dict__}")
+            
+            # Priority 1: Use user-provided override if available
+            if original_filename_override and original_filename_override.strip():
+                original_filename = original_filename_override.strip()
+                print(f"DEBUG: Using user-provided override: {original_filename}")
+            # Priority 2: Try to get original filename from Gradio file object attributes
+            elif hasattr(file, 'orig_name') and file.orig_name:
+                original_filename = file.orig_name
+                print(f"DEBUG: Found orig_name: {original_filename}")
+            elif hasattr(file, 'filename') and file.filename:
+                original_filename = file.filename
+                print(f"DEBUG: Found filename: {original_filename}")
+            elif hasattr(file, 'original_name') and file.original_name:
+                original_filename = file.original_name
+                print(f"DEBUG: Found original_name: {original_filename}")
+            elif hasattr(file, 'name') and file.name and not ('tmp' in file.name.lower() or 'temp' in file.name.lower()):
+                # If file.name doesn't look like a temp path, use it
+                original_filename = os.path.basename(file.name)
+                print(f"DEBUG: Using file.name as original: {original_filename}")
+            else:
+                # Fallback: Ask user or use a default name
+                original_filename = "uploaded_document.pdf"  # Default fallback
+                print(f"DEBUG: Using default fallback filename: {original_filename}")
+                print(f"DEBUG: Available file attributes: {[attr for attr in dir(file) if not attr.startswith('_')]}")
+            
+            print(f"DEBUG: Final - Original filename: {original_filename}, Temp path: {temp_file_path}")
+            
+            # Use doc_path if provided, otherwise generate from original filename
             if not doc_path or not doc_path.strip():
-                filename = os.path.basename(file.name) if hasattr(file, 'name') else str(file)
-                doc_path = f"/docs/{os.path.splitext(filename)[0]}"
+                clean_filename = os.path.splitext(original_filename)[0]
+                doc_path = f"/docs/{clean_filename}"
             
             # Ensure doc_path starts with /
             if not doc_path.startswith('/'):
                 doc_path = f"/{doc_path}"
             
             # Read file content
-            with open(file.name, 'rb') as f:
+            with open(temp_file_path, 'rb') as f:
                 file_content = f.read()
             
-            # Prepare metadata with doc_path
+            # Prepare metadata with doc_path and enhanced source info
             metadata = {
                 "doc_path": doc_path,
                 "operation": "upload",
                 "source": "fixed_ui",
+                "source_type": "web_upload",  # Add source_type for consistency
+                "upload_source": "fixed_ui",  # Additional source field
                 "upload_timestamp": datetime.now().isoformat(),
-                "original_filename": os.path.basename(file.name)
+                "original_filename": original_filename,  # Use the actual original filename
+                "filename": original_filename,  # Use the actual original filename
+                "display_name": os.path.splitext(original_filename)[0],
+                "temp_file_path": temp_file_path  # Keep track of temp path for debugging
             }
             
             # Upload via text ingestion endpoint (which properly handles doc_path)
@@ -369,12 +410,24 @@ class FixedRAGUI:
             if response.status_code == 200:
                 result = response.json()
                 
+                # Extract doc_id from API response or generate a better one
+                api_doc_id = result.get('doc_id') or result.get('document_id')
+                if not api_doc_id:
+                    # Generate a better doc_id using original filename instead of temp path
+                    api_doc_id = f"doc_{original_filename.replace(' ', '_').replace('.', '_')}"
+                    print(f"DEBUG: Generated doc_id from filename: {api_doc_id}")
+                else:
+                    print(f"DEBUG: Using API-provided doc_id: {api_doc_id}")
+                
                 # Add to registry
                 self.document_registry[doc_path] = {
                     'status': 'active',
                     'upload_count': self.document_registry.get(doc_path, {}).get('upload_count', 0) + 1,
                     'last_updated': datetime.now().isoformat(),
-                    'filename': os.path.basename(file.name),
+                    'filename': original_filename,  # Use the original filename
+                    'original_filename': original_filename,  # Store original filename
+                    'temp_file_path': temp_file_path,  # Store temp path for reference
+                    'doc_id': api_doc_id,  # Store the document ID
                     'chunks': result.get('chunks_created', 0),
                     'is_update': result.get('is_update', False),
                     'old_vectors_deleted': result.get('old_vectors_deleted', 0)
@@ -392,7 +445,7 @@ class FixedRAGUI:
                 status_icon = "🔄" if result.get('is_update', False) else "✅"
                 result_msg = f"{status_icon} **Document Uploaded Successfully!**\n"
                 result_msg += f"📄 **Document Path:** `{doc_path}`\n"
-                result_msg += f"📁 **File:** `{os.path.basename(file.name)}`\n"
+                result_msg += f"📁 **Original File:** `{original_filename}`\n"
                 result_msg += f"📝 **Chunks Created:** {result.get('chunks_created', 0)}\n"
                 
                 if result.get('is_update', False):
@@ -451,7 +504,21 @@ class FixedRAGUI:
         
         try:
             doc_info = self.document_registry[doc_path]
-            doc_id = doc_info.get("doc_id", f"doc_{doc_path.replace('/', '_')}")
+            
+            # Get doc_id with better fallback logic
+            doc_id = doc_info.get("doc_id")
+            if not doc_id:
+                # Generate a better fallback using original filename
+                original_filename = doc_info.get('filename', doc_info.get('original_filename', ''))
+                if original_filename and original_filename != 'Unknown':
+                    doc_id = f"doc_{original_filename.replace(' ', '_').replace('.', '_')}"
+                    print(f"DEBUG: Generated fallback doc_id from filename: {doc_id}")
+                else:
+                    # Last resort: use doc_path
+                    doc_id = f"doc_{doc_path.replace('/', '_')}"
+                    print(f"DEBUG: Generated fallback doc_id from doc_path: {doc_id}")
+            else:
+                print(f"DEBUG: Using stored doc_id: {doc_id}")
             
             # Call the proper delete endpoint to actually remove vectors
             try:
@@ -485,10 +552,17 @@ class FixedRAGUI:
             result += f"📄 **Document Path:** `{doc_path}`\n"
             result += f"📁 **Original File:** `{doc_info.get('filename', doc_info.get('original_filename', 'Unknown'))}`\n"
             # Enhanced document ID display for deletion
-            if doc_id == 'unknown':
-                filename = doc_info.get('filename', doc_info.get('original_filename', 'Unknown'))
-                result += f"🆔 **Document ID:** `{filename}` (Vector ID: unknown)\n"
+            original_filename = doc_info.get('filename', doc_info.get('original_filename', 'Unknown'))
+            
+            # Show user-friendly document ID
+            if original_filename and original_filename != 'Unknown':
+                # Show original filename as the primary identifier
+                result += f"🆔 **Document ID:** `{original_filename}`\n"
+                # Optionally show the technical doc_id if different
+                if doc_id and not doc_id.startswith('doc_' + original_filename.replace(' ', '_').replace('.', '_')):
+                    result += f"   📋 **Technical ID:** `{doc_id}`\n"
             else:
+                # Fallback to showing the doc_id
                 result += f"🆔 **Document ID:** `{doc_id}`\n"
             result += f"🗑️ **Deleted:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
             
@@ -613,15 +687,16 @@ class FixedRAGUI:
             
             registry_text += f"   📊 Status: {info.get('status', 'unknown').upper()}\n"
             
-            # Show source information
+            # Show source information with enhanced display
             source = info.get('source', 'unknown')
-            source_emoji = {
-                'fixed_ui': '🖥️',
-                'folder_monitor': '📁',
-                'api': '🔌',
-                'auto_sync': '🔄'
-            }.get(source, '📋')
-            registry_text += f"   {source_emoji} Source: {source.replace('_', ' ').title()}\n"
+            source_display = {
+                'fixed_ui': '🖥️ Web UI',
+                'web_upload': '📤 File Upload',
+                'folder_monitor': '📁 Folder Monitor',
+                'api': '🔌 API',
+                'auto_sync': '🔄 Auto Sync'
+            }.get(source, f"📋 {source.replace('_', ' ').title()}")
+            registry_text += f"   🔧 Source: {source_display}\n"
             
             registry_text += f"   📈 Upload Count: {info.get('upload_count', 1)}\n"
             
@@ -1794,9 +1869,10 @@ class FixedRAGUI:
                                 print(f"DEBUG: Metadata for vector {i} is None, using empty dict")
                                 metadata = {}
                             
-                            # Try different ways to get document identifier
+                            # Try different ways to get document identifier and original filename
                             doc_path = None
                             doc_name = None
+                            original_filename = None
                             
                             # Priority 1: doc_path from metadata
                             if isinstance(metadata, dict) and 'doc_path' in metadata:
@@ -1845,28 +1921,56 @@ class FixedRAGUI:
                                 doc_path = f"/unknown/vector_{vector_id}"
                                 doc_name = f"Unknown Document {vector_id}"
                             
+                            # Extract original filename with priority order
+                            if isinstance(metadata, dict):
+                                # Priority 1: original_filename field
+                                if metadata.get('original_filename'):
+                                    original_filename = metadata['original_filename']
+                                # Priority 2: filename field (if not a temp path)
+                                elif metadata.get('filename') and not ('temp' in str(metadata['filename']).lower() or 'tmp' in str(metadata['filename']).lower()):
+                                    original_filename = metadata['filename']
+                                # Priority 3: nested metadata
+                                elif 'metadata' in metadata and isinstance(metadata['metadata'], dict):
+                                    nested = metadata['metadata']
+                                    if nested.get('original_filename'):
+                                        original_filename = nested['original_filename']
+                                    elif nested.get('filename') and not ('temp' in str(nested['filename']).lower() or 'tmp' in str(nested['filename']).lower()):
+                                        original_filename = nested['filename']
+                            
                             # Ensure doc_path is not None
                             if doc_path is None:
                                 doc_path = f"/unknown/vector_{i}"
                                 doc_name = f"Unknown Document {i}"
                             
                             if doc_path not in documents:
-                                # Determine source - check both 'source' and 'source_type' fields
+                                # Determine source - check multiple source fields with better priority
                                 source = 'unknown'
                                 if isinstance(metadata, dict):
                                     # Priority 1: 'source' field (from UI)
                                     if metadata.get('source'):
                                         source = metadata['source']
-                                    # Priority 2: 'source_type' field (from ingestion engine)
+                                    # Priority 2: 'upload_source' field (from enhanced uploads)
+                                    elif metadata.get('upload_source'):
+                                        source = metadata['upload_source']
+                                    # Priority 3: 'source_type' field (from ingestion engine)
                                     elif metadata.get('source_type'):
                                         source = metadata['source_type']
-                                    # Priority 3: Check nested metadata
+                                    # Priority 4: Check nested metadata
                                     elif 'metadata' in metadata and isinstance(metadata['metadata'], dict):
                                         nested = metadata['metadata']
                                         if nested.get('source'):
                                             source = nested['source']
+                                        elif nested.get('upload_source'):
+                                            source = nested['upload_source']
                                         elif nested.get('source_type'):
                                             source = nested['source_type']
+                                    
+                                    # If still unknown, try to infer from file path
+                                    if source == 'unknown':
+                                        if 'temp' in str(doc_path).lower() or 'tmp' in str(doc_path).lower():
+                                            source = 'web_upload'  # Likely from UI upload
+                                        elif '/docs/' in str(doc_path):
+                                            source = 'fixed_ui'  # From UI with doc_path
                                 
                                 documents[doc_path] = {
                                     'name': doc_name,
@@ -1875,7 +1979,7 @@ class FixedRAGUI:
                                     'source': source,
                                     'last_updated': None,
                                     'file_size': None,
-                                    'original_filename': None
+                                    'original_filename': original_filename
                                 }
                             
                             documents[doc_path]['chunks'] += 1
@@ -1898,12 +2002,14 @@ class FixedRAGUI:
                                     if 'file_size' in nested:
                                         documents[doc_path]['file_size'] = nested['file_size']
                                 
-                                if 'original_filename' in metadata:
-                                    documents[doc_path]['original_filename'] = metadata['original_filename']
-                                elif 'metadata' in metadata and isinstance(metadata['metadata'], dict):
-                                    nested = metadata['metadata']
-                                    if 'original_filename' in nested:
-                                        documents[doc_path]['original_filename'] = nested['original_filename']
+                                # Update original filename if not already set
+                                if not documents[doc_path]['original_filename']:
+                                    if 'original_filename' in metadata:
+                                        documents[doc_path]['original_filename'] = metadata['original_filename']
+                                    elif 'metadata' in metadata and isinstance(metadata['metadata'], dict):
+                                        nested = metadata['metadata']
+                                        if 'original_filename' in nested:
+                                            documents[doc_path]['original_filename'] = nested['original_filename']
                         
                         except Exception as e:
                             print(f"DEBUG: Error processing vector {i}: {str(e)}")
@@ -1973,13 +2079,36 @@ class FixedRAGUI:
             sorted_docs = sorted(documents.items(), key=lambda x: x[1]['chunks'], reverse=True)
             
             for doc_path, doc_info in sorted_docs:
-                doc_text += f"📄 **{doc_info['name']}**\n"
-                doc_text += f"   📁 Path: `{doc_path}`\n"
-                doc_text += f"   📝 Chunks: **{doc_info['chunks']}**\n"
-                doc_text += f"   🔧 Source: {doc_info['source']}\n"
+                # Use original filename for display if available and it's a temp path
+                display_name = doc_info['name']
+                is_temp_path = 'temp' in str(doc_path).lower() or 'tmp' in str(doc_path).lower()
                 
-                if doc_info['original_filename'] and doc_info['original_filename'] != doc_info['name']:
-                    doc_text += f"   📁 Original File: {doc_info['original_filename']}\n"
+                if is_temp_path and doc_info['original_filename']:
+                    display_name = doc_info['original_filename']
+                
+                doc_text += f"📄 **{display_name}**\n"
+                
+                # Show path differently for temp vs normal paths
+                if is_temp_path:
+                    doc_text += f"   📁 Path: `{doc_path}` (temporary)\n"
+                    if doc_info['original_filename']:
+                        doc_text += f"   📁 Original File: `{doc_info['original_filename']}`\n"
+                else:
+                    doc_text += f"   📁 Path: `{doc_path}`\n"
+                
+                doc_text += f"   📝 Chunks: **{doc_info['chunks']}**\n"
+                
+                # Enhanced source display with better formatting
+                source_display = doc_info['source']
+                source_emoji = {
+                    'fixed_ui': '🖥️ Web UI',
+                    'web_upload': '📤 File Upload',
+                    'folder_monitor': '📁 Folder Monitor',
+                    'api': '🔌 API',
+                    'auto_sync': '🔄 Auto Sync'
+                }.get(source_display, f"📋 {source_display.replace('_', ' ').title()}")
+                
+                doc_text += f"   🔧 Source: {source_emoji}\n"
                 
                 if doc_info['file_size']:
                     size_mb = doc_info['file_size'] / (1024 * 1024)
@@ -3295,11 +3424,27 @@ The LangGraph conversation system is not currently available. This could be due 
                                     result += f"- `{folder}`\n"
                                 if len(monitored_folders) > 5:
                                     result += f"- ... and {len(monitored_folders) - 5} more\n"
+                                
+                                # Trigger immediate scan to process files
+                                try:
+                                    scan_response = requests.post(f"{self.api_url}/folder-monitor/scan", timeout=30)
+                                    if scan_response.status_code == 200:
+                                        scan_data = scan_response.json()
+                                        if scan_data.get('success'):
+                                            result += f"\n🔍 **Immediate Scan Triggered:**\n"
+                                            result += f"- Changes Detected: {scan_data.get('changes_detected', 0)}\n"
+                                            result += f"- Files Tracked: {scan_data.get('files_tracked', 0)}\n"
+                                        else:
+                                            result += f"\n⚠️ **Scan Warning:** {scan_data.get('error', 'Unknown error')}\n"
+                                    else:
+                                        result += f"\n⚠️ **Scan Error:** HTTP {scan_response.status_code}\n"
+                                except Exception as scan_e:
+                                    result += f"\n⚠️ **Scan Error:** {str(scan_e)}\n"
                             else:
                                 result += f"\n⚠️ **Note:** No folders are currently configured for monitoring.\n"
                                 result += f"Use the folder input above to add folders to monitor.\n"
                     
-                    result += f"\n💡 **Note:** Monitoring service is now active and will check for file changes every 30 seconds."
+                    result += f"\n💡 **Note:** Monitoring service is now active and will check for file changes automatically."
                     return result
                 else:
                     error_msg = data.get('error', 'Unknown error')
@@ -3307,6 +3452,15 @@ The LangGraph conversation system is not currently available. This could be due 
                         return f"ℹ️ **Monitoring Already Running**\n\n🟢 The folder monitoring service is already active.\n\n💡 Use 'Refresh Status' to see current monitoring details."
                     else:
                         return f"❌ Failed to start monitoring: {error_msg}"
+            elif response.status_code == 400:
+                try:
+                    error_detail = response.json().get('detail', 'Unknown error')
+                    if "no folders configured" in error_detail.lower():
+                        return f"⚠️ **Cannot Start Monitoring**\n\n❌ {error_detail}\n\n💡 **Solution:** Add a folder to monitoring first using the input field above."
+                    else:
+                        return f"❌ HTTP {response.status_code}: {error_detail}"
+                except:
+                    return f"❌ HTTP {response.status_code}: {self._safe_response_text(response)}"
             else:
                 try:
                     error_detail = response.json().get('detail', 'Unknown error')
@@ -3982,6 +4136,12 @@ def create_fixed_interface():
                             info="If path exists, document will be updated. If new, document will be created."
                         )
                         
+                        original_filename_input = gr.Textbox(
+                            label="📝 Original Filename (Optional)",
+                            placeholder="e.g., BuildingC_Network_Layout.pdf (auto-detected if empty)",
+                            info="Override the auto-detected filename. Useful if the original name isn't detected correctly."
+                        )
+                        
                         upload_btn = gr.Button("📤 Upload/Update Document", variant="primary", size="lg")
                         
                         gr.Markdown("---")
@@ -4300,6 +4460,9 @@ def create_fixed_interface():
                             stop_monitor_btn = gr.Button("🛑 Stop Monitoring", variant="stop")
                             status_refresh_btn = gr.Button("🔄 Refresh Status", variant="secondary")
                             force_scan_btn = gr.Button("🔍 Force Scan", variant="secondary")
+                        
+                        with gr.Row():
+                            retry_failed_btn = gr.Button("🔄 Retry Failed Files", variant="secondary")
                         
                         gr.Markdown("""
                         **💡 How to use:**
@@ -5986,9 +6149,9 @@ def create_fixed_interface():
         )
         
         # Main upload/update operation
-        def upload_and_refresh(file, doc_path):
-            print(f"DEBUG: upload_and_refresh called with file: {file}, doc_path: {doc_path}")
-            result, registry, dropdown_choices = ui.upload_and_refresh(file, doc_path)
+        def upload_and_refresh(file, doc_path, original_filename):
+            print(f"DEBUG: upload_and_refresh called with file: {file}, doc_path: {doc_path}, original_filename: {original_filename}")
+            result, registry, dropdown_choices = ui.upload_and_refresh(file, doc_path, original_filename)
             print(f"DEBUG: Upload result: {result[:100]}...")
             print(f"DEBUG: Dropdown choices: {dropdown_choices}")
             print(f"DEBUG: Dropdown choices type: {type(dropdown_choices)}")
@@ -6007,7 +6170,7 @@ def create_fixed_interface():
         
         upload_btn.click(
             fn=upload_and_refresh,
-            inputs=[file_input, doc_path_input],
+            inputs=[file_input, doc_path_input, original_filename_input],
             outputs=[operation_result, document_registry_display, delete_doc_path_input]
         )
         
@@ -6175,12 +6338,45 @@ def create_fixed_interface():
         
         # Folder monitoring event handlers
         def start_monitoring_and_refresh(folder_path):
-            # If folder path is provided, add it to monitoring
+            # If folder path is provided, add it to monitoring first
             if folder_path and folder_path.strip():
-                result = ui.add_folder_to_monitoring(folder_path)
+                # Step 1: Add folder to monitoring
+                add_result = ui.add_folder_to_monitoring(folder_path)
+                
+                # Step 2: Start the monitoring service
+                start_result = ui.start_monitoring_service()
+                
+                # Combine results
+                result = f"{add_result}\n\n---\n\n{start_result}"
             else:
-                # If no folder path, just start the monitoring service
-                result = ui.start_monitoring_service()
+                # If no folder path, check if any folders are configured
+                try:
+                    status_response = requests.get(f"{ui.api_url}/folder-monitor/status", timeout=10)
+                    if status_response.status_code == 200:
+                        status_data = status_response.json()
+                        if status_data.get('success'):
+                            monitored_folders = status_data.get('status', {}).get('monitored_folders', [])
+                            
+                            if monitored_folders:
+                                # Folders are configured, just start monitoring
+                                result = ui.start_monitoring_service()
+                            else:
+                                # No folders configured
+                                result = "⚠️ **Cannot Start Monitoring**\n\n"
+                                result += "❌ No folders are currently configured for monitoring.\n\n"
+                                result += "💡 **To start monitoring:**\n"
+                                result += "1. Enter a folder path in the input field above\n"
+                                result += "2. Click 'Start/Resume Monitoring' again\n\n"
+                                result += "📁 **Example paths:**\n"
+                                result += "- `D:\\Projects-D\\pepsi-final2\\document_generator\\test_data`\n"
+                                result += "- `C:\\Users\\YourName\\Documents\\MyFiles`\n"
+                                result += "- `./data/documents`"
+                        else:
+                            result = f"❌ Error checking status: {status_data.get('error', 'Unknown error')}"
+                    else:
+                        result = f"❌ HTTP Error {status_response.status_code} checking status"
+                except Exception as e:
+                    result = f"❌ Error checking folder status: {str(e)}"
             
             status = ui.get_monitoring_status()
             registry = ui._format_document_registry()
@@ -6227,9 +6423,63 @@ def create_fixed_interface():
                         result += f"📄 **Changes Detected:** {data.get('changes_detected', 0)}\n"
                         result += f"📊 **Files Tracked:** {data.get('files_tracked', 0)}\n"
                         result += f"📅 **Scan Time:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+                        
+                        # Check if there are failed files and offer retry
+                        try:
+                            status_response = requests.get(f"{ui.api_url}/folder-monitor/status", timeout=10)
+                            if status_response.status_code == 200:
+                                status_data = status_response.json()
+                                if status_data.get('success'):
+                                    status_info = status_data.get('status', {})
+                                    failed_files = status_info.get('files_failed', 0)
+                                    skipped_files = status_info.get('files_skipped', 0)
+                                    
+                                    if failed_files > 0:
+                                        result += f"\n⚠️ **Note:** {failed_files} files failed processing. You can retry them using the 'Retry Failed Files' button.\n"
+                                    if skipped_files > 0:
+                                        result += f"\n✅ **Note:** {skipped_files} files were skipped (likely duplicates).\n"
+                        except:
+                            pass
+                        
                         result += f"\n💡 **Note:** Check file status for detailed processing results."
                     else:
                         result = f"❌ **Scan Failed:** {data.get('error', 'Unknown error')}"
+                else:
+                    result = f"❌ **HTTP Error:** {response.status_code}"
+            except Exception as e:
+                result = f"❌ **Error:** {str(e)}"
+            
+            # Also refresh status
+            status = ui.get_monitoring_status()
+            file_status = ui.get_detailed_file_status()
+            registry = ui._format_document_registry()
+            dropdown_choices = ui.get_document_paths()
+            
+            # Ensure dropdown_choices is a proper list of strings
+            if not isinstance(dropdown_choices, list):
+                dropdown_choices = ["(No documents uploaded yet)"]
+            
+            safe_choices = [str(choice) for choice in dropdown_choices if choice is not None]
+            if not safe_choices:
+                safe_choices = ["(No documents uploaded yet)"]
+            
+            return result, status, file_status, registry, gr.update(choices=safe_choices, value=None)
+        
+        def retry_failed_files_and_refresh():
+            """Retry failed file ingestion"""
+            try:
+                response = requests.post(f"{ui.api_url}/folder-monitor/retry", timeout=30)
+                if response.status_code == 200:
+                    data = response.json()
+                    if data.get('success'):
+                        result = f"🔄 **Retry Completed**\n\n"
+                        result += f"📄 **Files Reset:** {data.get('files_reset', 0)}\n"
+                        result += f"📅 **Retry Time:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+                        result += f"\n💡 **Note:** Failed files have been reset to pending status and will be processed automatically."
+                    else:
+                        result = f"❌ **Retry Failed:** {data.get('error', 'Unknown error')}"
+                elif response.status_code == 404:
+                    result = f"❌ **Retry Endpoint Not Available**\n\nThe retry functionality requires a server restart to be available."
                 else:
                     result = f"❌ **HTTP Error:** {response.status_code}"
             except Exception as e:
@@ -6291,6 +6541,11 @@ def create_fixed_interface():
         
         force_scan_btn.click(
             fn=force_scan_and_refresh,
+            outputs=[monitor_result, monitor_status_display, file_status_display, document_registry_display, delete_doc_path_input]
+        )
+        
+        retry_failed_btn.click(
+            fn=retry_failed_files_and_refresh,
             outputs=[monitor_result, monitor_status_display, file_status_display, document_registry_display, delete_doc_path_input]
         )
         

@@ -76,15 +76,30 @@ def create_pdf_processor(config: Optional[Dict[str, Any]] = None,
     """Create a PDF processor with optional Azure AI integration"""
     azure_client = None
     
+    # Extract Azure config from general config if not provided separately
+    if not azure_config and config and 'azure_ai' in config:
+        azure_config = config['azure_ai']
+        logging.info("Extracted Azure AI config from general config")
+    
     # Try to create Azure AI client if config provided
-    if azure_config:
+    if azure_config and azure_config.get('computer_vision_endpoint') and azure_config.get('computer_vision_key'):
         try:
-            from ...integrations.azure_ai.azure_client import AzureAIClient
+            # Try relative import first, then absolute
+            try:
+                from ...integrations.azure_ai.azure_client import AzureAIClient
+            except ImportError:
+                from integrations.azure_ai.azure_client import AzureAIClient
             azure_client = AzureAIClient(azure_config)
             logging.info("Azure AI client created successfully for PDF processing")
+            logging.info(f"Azure CV endpoint: {azure_config.get('computer_vision_endpoint', 'N/A')[:50]}...")
         except Exception as e:
             logging.error(f"Failed to create Azure AI client: {e}")
             logging.info("Falling back to basic PDF processor")
+    else:
+        if azure_config:
+            logging.warning("Azure config provided but missing computer_vision_endpoint or computer_vision_key")
+        else:
+            logging.info("No Azure AI config available")
     
     # Use enhanced processor if available and Azure client created
     if EnhancedPDFProcessor and azure_client:

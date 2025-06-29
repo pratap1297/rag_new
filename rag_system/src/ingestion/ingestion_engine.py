@@ -301,7 +301,7 @@ class IngestionEngine:
                 'filename': file_path.name,
                 'file_size': file_path.stat().st_size,
                 'file_type': file_path.suffix,
-                'source_type': 'file',
+                'source_type': metadata.get('source_type', 'file') if metadata else 'file',  # Respect input source_type
                 'ingested_at': datetime.now().isoformat(),
                 'processor': 'ingestion_engine',
                 'is_update': old_vectors_deleted > 0,
@@ -723,6 +723,9 @@ class IngestionEngine:
         """Extract text content from various file types"""
         file_extension = file_path.suffix.lower()
         
+        # ADD LOGGING: Start of text extraction
+        logging.info(f"🔍 Using processor: {self.processor_registry.get_processor(str(file_path)).__class__.__name__ if self.processor_registry.get_processor(str(file_path)) else 'No specialized processor'} for {file_path}")
+        
         # Reset processor flags
         self._processor_chunks = None
         self._use_processor_chunks = False
@@ -731,9 +734,73 @@ class IngestionEngine:
         processor = self.processor_registry.get_processor(str(file_path))
         if processor:
             try:
+                # ADD LOGGING: Before processing
+                processor_start = datetime.now()
+                logging.info(f"🔍 Using processor: {processor.__class__.__name__} for {file_path}")
+                
                 result = processor.process(str(file_path), getattr(self, '_current_metadata', {}))
                 
+                # ADD LOGGING: After processing
+                processor_time = (datetime.now() - processor_start).total_seconds()
+                
                 if result.get('status') == 'success' and result.get('chunks'):
+                    logging.info(f"✅ Processor succeeded, chunks: {len(result.get('chunks', []))}")
+                    logging.info(f"   Processing time: {processor_time:.2f}s")
+                    
+                    # ADD DETAILED LOGGING: Log chunk preview
+                    if result.get('chunks') and logging.getLogger().isEnabledFor(logging.DEBUG):
+                        for i, chunk in enumerate(result['chunks'][:3]):  # First 3 chunks
+                            logging.debug(f"Chunk {i} preview: {chunk['text'][:200]}...")
+                            chunk_metadata = chunk.get('metadata', {})
+                            logging.debug(f"Chunk {i} metadata keys: {list(chunk_metadata.keys())}")
+                            
+                            # Log specific important metadata
+                            important_keys = ['source_type', 'content_type', 'page_number', 'extraction_method', 'processor']
+                            for key in important_keys:
+                                if key in chunk_metadata:
+                                    logging.debug(f"  {key}: {chunk_metadata[key]}")
+                    
+                    # ADD LOGGING: Save processor result for debugging
+                    if os.getenv('RAG_SAVE_EXTRACTION_DUMPS', 'false').lower() == 'true' or logging.getLogger().isEnabledFor(logging.DEBUG):
+                        debug_file = f"debug_processor_result_{file_path.stem}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+                        debug_path = Path("data/logs") / debug_file
+                        debug_path.parent.mkdir(parents=True, exist_ok=True)
+                        
+                        try:
+                            # Create a serializable version with full content
+                            debug_result = {k: v for k, v in result.items() if k not in ['chunks']}
+                            debug_result['chunk_count'] = len(result.get('chunks', []))
+                            debug_result['processing_time_seconds'] = processor_time
+                            debug_result['processor_name'] = processor.__class__.__name__
+                            
+                            # Include extracted text if available
+                            if 'text' in result:
+                                debug_result['extracted_text'] = result['text']
+                                debug_result['extracted_text_length'] = len(result['text'])
+                                debug_result['extracted_text_preview'] = result['text'][:500] + "..." if len(result['text']) > 500 else result['text']
+                            
+                            # Include chunk details
+                            chunks = result.get('chunks', [])
+                            debug_result['chunks_detail'] = []
+                            for i, chunk in enumerate(chunks[:5]):  # Limit to first 5 chunks for space
+                                chunk_info = {
+                                    'chunk_index': i,
+                                    'content_length': len(chunk.get('content', '')),
+                                    'content_preview': chunk.get('content', '')[:200] + "..." if len(chunk.get('content', '')) > 200 else chunk.get('content', ''),
+                                    'metadata': chunk.get('metadata', {})
+                                }
+                                debug_result['chunks_detail'].append(chunk_info)
+                            
+                            if len(chunks) > 5:
+                                debug_result['chunks_detail'].append({'note': f'... and {len(chunks) - 5} more chunks'})
+                            
+                            import json
+                            with open(debug_path, 'w', encoding='utf-8') as f:
+                                json.dump(debug_result, f, indent=2, ensure_ascii=False, default=str)
+                            logging.debug(f"Processor result with content saved to {debug_path}")
+                        except Exception as save_error:
+                            logging.warning(f"Failed to save processor debug data: {save_error}")
+                    
                     # Store processor chunks to use directly
                     self._processor_chunks = result['chunks']
                     self._use_processor_chunks = True
@@ -743,30 +810,83 @@ class IngestionEngine:
                         self._current_metadata.update({
                             'processor_used': processor.__class__.__name__,
                             'processor_chunk_count': len(result['chunks']),
+                            'processor_processing_time': processor_time,
                             **{k: v for k, v in result.items() if k not in ['chunks', 'status', 'text']}
                         })
                     
                     # Return dummy text to satisfy the flow
                     return "[Processed by specialized processor]"
+                else:
+                    # ADD LOGGING: Processor failed or no chunks
+                    if result.get('status') == 'success':
+                        logging.warning(f"⚠️ Processor {processor.__class__.__name__} succeeded but returned no chunks")
+                    else:
+                        logging.warning(f"⚠️ Processor {processor.__class__.__name__} failed: {result.get('error', 'Unknown error')}")
+                    
             except Exception as e:
-                logging.error(f"Processor failed for {file_path}: {e}")
+                processor_time = (datetime.now() - processor_start).total_seconds() if 'processor_start' in locals() else 0
+                logging.error(f"❌ Processor {processor.__class__.__name__} failed for {file_path} (after {processor_time:.2f}s): {e}")
+                import traceback
+                logging.debug(f"Full traceback: {traceback.format_exc()}")
         
         # Default extraction methods
         try:
+            # ADD LOGGING: Fallback to default extraction
+            logging.info(f"🔄 Using default extraction for {file_extension} file: {file_path}")
+            extraction_start = datetime.now()
+            
             if file_extension == '.txt':
-                return self._extract_text_file(file_path)
+                text = self._extract_text_file(file_path)
             elif file_extension == '.pdf':
-                return self._extract_pdf_file(file_path)
+                text = self._extract_pdf_file(file_path)
             elif file_extension in ['.docx', '.doc']:
-                return self._extract_docx_file(file_path)
+                text = self._extract_docx_file(file_path)
             elif file_extension == '.md':
-                return self._extract_markdown_file(file_path)
+                text = self._extract_markdown_file(file_path)
             elif file_extension in ['.xlsx', '.xls', '.xlsm']:
-                return self._extract_excel_basic(file_path)
+                text = self._extract_excel_basic(file_path)
             else:
-                return self._extract_text_file(file_path)
+                text = self._extract_text_file(file_path)
+            
+            # ADD LOGGING: Default extraction success
+            extraction_time = (datetime.now() - extraction_start).total_seconds()
+            logging.info(f"✅ Default extraction completed in {extraction_time:.2f}s")
+            logging.info(f"   Extracted text length: {len(text):,} chars")
+            logging.debug(f"   Text preview: {text[:200]}..." if len(text) > 200 else f"   Text: {text}")
+            
+            # ADD LOGGING: Save default extraction result for debugging
+            if os.getenv('RAG_SAVE_EXTRACTION_DUMPS', 'false').lower() == 'true' or logging.getLogger().isEnabledFor(logging.DEBUG):
+                debug_file = f"debug_default_extraction_{file_path.stem}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+                debug_path = Path("data/logs") / debug_file
+                debug_path.parent.mkdir(parents=True, exist_ok=True)
+                
+                try:
+                    debug_result = {
+                        'extraction_method': 'default',
+                        'file_path': str(file_path),
+                        'file_extension': file_extension,
+                        'processing_time_seconds': extraction_time,
+                        'extracted_text': text,
+                        'extracted_text_length': len(text),
+                        'extracted_text_preview': text[:500] + "..." if len(text) > 500 else text,
+                        'timestamp': datetime.now().isoformat(),
+                        'status': 'success'
+                    }
+                    
+                    import json
+                    with open(debug_path, 'w', encoding='utf-8') as f:
+                        json.dump(debug_result, f, indent=2, ensure_ascii=False, default=str)
+                    logging.debug(f"Default extraction result with content saved to {debug_path}")
+                except Exception as save_error:
+                    logging.warning(f"Failed to save default extraction debug data: {save_error}")
+            
+            return text
+            
         except Exception as e:
-            raise FileProcessingError(f"Failed to extract text from {file_path}: {e}")
+            extraction_time = (datetime.now() - extraction_start).total_seconds() if 'extraction_start' in locals() else 0
+            error_msg = f"Failed to extract text from {file_path} (after {extraction_time:.2f}s): {e}"
+            logging.error(f"❌ {error_msg}")
+            raise FileProcessingError(error_msg)
     
     def _extract_text_file(self, file_path: Path) -> str:
         """Extract text from plain text file"""

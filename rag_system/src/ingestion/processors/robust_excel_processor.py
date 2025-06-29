@@ -2,11 +2,14 @@
 Robust Excel Processor
 Excel processor with comprehensive Azure AI integration and fallback
 """
+import json
 import logging
+import os
 from typing import Dict, Any, Optional, List, Tuple
 from pathlib import Path
 import io
 import base64
+from datetime import datetime
 
 from .base_processor import BaseProcessor
 from ...integrations.azure_ai.robust_azure_client import RobustAzureAIClient
@@ -33,7 +36,15 @@ class RobustExcelProcessor(BaseProcessor):
     def __init__(self, config: Dict[str, Any], azure_client: Optional[RobustAzureAIClient] = None):
         super().__init__(config)
         self.azure_client = azure_client
-        self.logger = logging.getLogger(__name__)
+        self.logger = logging.getLogger('RobustExcelProcessor')
+        
+        # Debug configuration
+        self.extraction_debug = os.getenv('RAG_EXTRACTION_DEBUG', 'false').lower() == 'true'
+        self.save_extraction_dumps = os.getenv('RAG_SAVE_EXTRACTION_DUMPS', 'false').lower() == 'true'
+        
+        if self.extraction_debug:
+            self.logger.setLevel(logging.DEBUG)
+            self.logger.info("🔍 Robust Excel Processor - Debug mode enabled")
         
         # Configuration
         self.max_file_size_mb = config.get('max_file_size_mb', 50)
@@ -101,40 +112,96 @@ class RobustExcelProcessor(BaseProcessor):
     
     def process(self, file_path: str, metadata: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """Process Excel file with comprehensive error handling"""
+        start_time = datetime.now()
         file_path = Path(file_path)
+        
+        self.logger.info(f"📊 Starting Excel processing: {file_path}")
+        self.logger.info(f"📊 File size: {file_path.stat().st_size:,} bytes")
         
         # Validate file
         validation_result = self._validate_file(file_path)
         if not validation_result['valid']:
+            self.logger.error(f"📊 Excel validation failed: {validation_result['error']}")
             return {
                 'success': False,
                 'error': validation_result['error'],
                 'processor': 'robust_excel'
             }
         
+        self.logger.info(f"📊 Excel file validation passed")
+        
         try:
             # Load workbook
+            self.logger.debug(f"📊 Loading Excel workbook...")
             workbook = openpyxl.load_workbook(file_path, data_only=True)
+            
+            # ADD LOGGING: Workbook properties
+            self.logger.info(f"📊 Excel Workbook Properties:")
+            self.logger.info(f"  - Worksheets: {len(workbook.sheetnames)}")
+            self.logger.info(f"  - Sheet names: {workbook.sheetnames}")
+            self.logger.info(f"  - Azure AI available: {'Yes' if (self.azure_client and self.azure_client.is_healthy()) else 'No'}")
             
             # Process workbook
             result = self._process_workbook(workbook, file_path, metadata)
+            
+            # Processing summary
+            processing_time = (datetime.now() - start_time).total_seconds()
             
             # Add processing metadata
             result.update({
                 'success': True,
                 'processor': 'robust_excel',
                 'file_size': file_path.stat().st_size,
+                'processing_start': start_time.isoformat(),
+                'processing_end': datetime.now().isoformat(),
+                'processing_time_seconds': processing_time,
                 'azure_ai_used': self.azure_client is not None and self.azure_client.is_healthy()
             })
+            
+            self.logger.info(f"✅ Excel processing completed in {processing_time:.2f}s")
+            self.logger.info(f"📊 Final Result:")
+            self.logger.info(f"  - Total text length: {len(result.get('text', '')):,} chars")
+            self.logger.info(f"  - Sheets processed: {len(result.get('sheets', []))}")
+            self.logger.info(f"  - Images processed: {result.get('images_processed', 0)}")
+            self.logger.info(f"  - Charts processed: {result.get('charts_processed', 0)}")
+            self.logger.info(f"  - Total cells: {result.get('total_cells', 0):,}")
+            
+            # ADD LOGGING: Save debug data if enabled
+            if self.save_extraction_dumps or self.logger.isEnabledFor(logging.DEBUG):
+                debug_file = f"debug_excel_extract_{file_path.stem}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+                debug_path = Path("data/logs") / debug_file
+                debug_path.parent.mkdir(parents=True, exist_ok=True)
+                
+                # Create a serializable version
+                debug_result = {k: v for k, v in result.items()}
+                debug_result['chunk_preview'] = [
+                    {
+                        'sheet_name': sheet.get('name', 'Unknown'),
+                        'text_length': len(sheet.get('text', '')),
+                        'text_preview': sheet.get('text', '')[:200] + '...' if len(sheet.get('text', '')) > 200 else sheet.get('text', ''),
+                        'cell_count': sheet.get('cell_count', 0)
+                    }
+                    for sheet in result.get('sheets', [])[:3]  # First 3 sheets
+                ]
+                
+                try:
+                    with open(debug_path, 'w', encoding='utf-8') as f:
+                        json.dump(debug_result, f, indent=2, ensure_ascii=False, default=str)
+                    self.logger.debug(f"Full Excel extraction saved to {debug_path}")
+                except Exception as e:
+                    self.logger.warning(f"Failed to save debug data: {e}")
             
             return result
             
         except Exception as e:
-            self.logger.error(f"Failed to process Excel file {file_path}: {e}")
+            error_msg = f"Excel processing failed: {str(e)}"
+            processing_time = (datetime.now() - start_time).total_seconds()
+            self.logger.error(f"❌ {error_msg} (after {processing_time:.2f}s)")
             return {
                 'success': False,
-                'error': f"Excel processing failed: {str(e)}",
-                'processor': 'robust_excel'
+                'error': error_msg,
+                'processor': 'robust_excel',
+                'processing_time_seconds': processing_time
             }
     
     def _validate_file(self, file_path: Path) -> Dict[str, Any]:
@@ -165,6 +232,8 @@ class RobustExcelProcessor(BaseProcessor):
     
     def _process_workbook(self, workbook, file_path: Path, metadata: Optional[Dict[str, Any]]) -> Dict[str, Any]:
         """Process entire workbook"""
+        self.logger.info(f"📊 Processing Excel workbook with {len(workbook.sheetnames)} sheets")
+        
         result = {
             'text': '',
             'sheets': [],
@@ -175,10 +244,27 @@ class RobustExcelProcessor(BaseProcessor):
         }
         
         # Process each worksheet
-        for sheet_name in workbook.sheetnames:
+        for sheet_idx, sheet_name in enumerate(workbook.sheetnames, 1):
+            sheet_start = datetime.now()
+            
             try:
+                self.logger.debug(f"📊 Processing sheet {sheet_idx}/{len(workbook.sheetnames)}: '{sheet_name}'")
                 sheet = workbook[sheet_name]
                 sheet_result = self._process_worksheet(sheet, sheet_name)
+                
+                # ADD LOGGING: Sheet processing results
+                sheet_processing_time = (datetime.now() - sheet_start).total_seconds()
+                self.logger.info(f"📊 Sheet '{sheet_name}' processed:")
+                self.logger.info(f"  - Text length: {len(sheet_result['text']):,} chars")
+                self.logger.info(f"  - Cell count: {sheet_result.get('cell_count', 0):,}")
+                self.logger.info(f"  - Images: {sheet_result.get('images_processed', 0)}")
+                self.logger.info(f"  - Charts: {sheet_result.get('charts_processed', 0)}")
+                self.logger.info(f"  - Processing time: {sheet_processing_time:.2f}s")
+                
+                if self.logger.isEnabledFor(logging.DEBUG):
+                    self.logger.debug(f"  - Dimensions: {sheet_result.get('metadata', {}).get('dimensions', 'Unknown')}")
+                    self.logger.debug(f"  - Has merged cells: {sheet_result.get('metadata', {}).get('has_merged_cells', False)}")
+                    self.logger.debug(f"  - Text preview: {sheet_result['text'][:200]}..." if len(sheet_result['text']) > 200 else f"  - Text: {sheet_result['text']}")
                 
                 result['sheets'].append(sheet_result)
                 result['text'] += f"\n\n--- Sheet: {sheet_name} ---\n"
@@ -188,11 +274,13 @@ class RobustExcelProcessor(BaseProcessor):
                 result['total_cells'] += sheet_result.get('cell_count', 0)
                 
             except Exception as e:
-                self.logger.error(f"Failed to process sheet {sheet_name}: {e}")
+                sheet_processing_time = (datetime.now() - sheet_start).total_seconds()
+                self.logger.error(f"❌ Failed to process sheet '{sheet_name}' (after {sheet_processing_time:.2f}s): {e}")
                 result['sheets'].append({
                     'name': sheet_name,
                     'error': str(e),
-                    'text': f"[Error processing sheet {sheet_name}: {str(e)}]"
+                    'text': f"[Error processing sheet {sheet_name}: {str(e)}]",
+                    'processing_time_seconds': sheet_processing_time
                 })
         
         # Process workbook-level elements
@@ -228,7 +316,10 @@ class RobustExcelProcessor(BaseProcessor):
         max_row = min(sheet.max_row, self.max_rows_per_sheet)
         max_col = min(sheet.max_column, self.max_cols_per_sheet)
         
+        self.logger.debug(f"📊 Sheet '{sheet_name}' dimensions: {max_row}x{max_col} (original: {sheet.max_row}x{sheet.max_column})")
+        
         if max_row == 0 or max_col == 0:
+            self.logger.debug(f"📊 Sheet '{sheet_name}' is empty")
             result['text'] = f"[Empty sheet: {sheet_name}]"
             return result
         

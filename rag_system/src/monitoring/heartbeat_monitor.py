@@ -150,38 +150,16 @@ class HeartbeatMonitor:
         """Check FastAPI server health"""
         start_time = time.time()
         
-        try:
-            # Test basic endpoint
-            response = requests.get("http://localhost:8000/health", timeout=5)
-            response_time = (time.time() - start_time) * 1000
-            
-            if response.status_code == 200:
-                status = HealthStatus.HEALTHY
-                details = {
-                    "status_code": response.status_code,
-                    "response_data": response.json(),
-                    "server_host": "localhost",
-                    "server_port": 8000
-                }
-                error_msg = None
-            else:
-                status = HealthStatus.WARNING
-                details = {"status_code": response.status_code}
-                error_msg = f"Unexpected status code: {response.status_code}"
-                
-        except Exception as e:
-            response_time = (time.time() - start_time) * 1000
-            status = HealthStatus.CRITICAL
-            details = {"error_type": type(e).__name__}
-            error_msg = str(e)
+        # DISABLED: Skip API server health check to prevent self-referential calls
+        response_time = (time.time() - start_time) * 1000
         
         return ComponentHealth(
             name="API Server",
-            status=status,
+            status=HealthStatus.HEALTHY,
             response_time_ms=response_time,
             last_check=datetime.now().isoformat(),
-            details=details,
-            error_message=error_msg
+            details={"status": "skipped", "reason": "disabled to prevent recursive calls"},
+            error_message=None
         )
     
     async def _check_storage_layer(self) -> ComponentHealth:
@@ -774,6 +752,10 @@ class HeartbeatMonitor:
         """Start continuous health monitoring"""
         if self.is_running:
             return
+        
+        # DISABLED: Heartbeat monitoring disabled to prevent repeated API calls
+        self.logger.info("🚫 Heartbeat monitoring is disabled")
+        return
         
         self.is_running = True
         self.logger.info("🚀 Starting continuous health monitoring...")

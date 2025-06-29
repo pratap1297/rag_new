@@ -52,7 +52,7 @@ class FolderMonitor:
         
         # Configuration
         self.check_interval = 60  # seconds
-        self.supported_extensions = {'.txt', '.md', '.pdf', '.docx', '.json', '.csv'}
+        self.supported_extensions = {'.txt', '.md', '.pdf', '.docx', '.doc', '.json', '.csv', '.xlsx', '.xls', '.xlsm', '.xlsb', '.jpg', '.jpeg', '.png', '.gif', '.bmp', '.tiff', '.tif', '.webp', '.svg'}
         self.max_file_size_mb = 100
         self.auto_ingest = True
         self.recursive = True
@@ -85,7 +85,7 @@ class FolderMonitor:
             
             if folder_config:
                 self.check_interval = getattr(folder_config, 'check_interval_seconds', 60)
-                self.supported_extensions = set(getattr(folder_config, 'supported_extensions', ['.txt', '.md', '.pdf', '.docx', '.json', '.csv']))
+                self.supported_extensions = set(getattr(folder_config, 'supported_extensions', ['.txt', '.md', '.pdf', '.docx', '.doc', '.json', '.csv', '.xlsx', '.xls', '.xlsm', '.xlsb', '.jpg', '.jpeg', '.png', '.gif', '.bmp', '.tiff', '.tif', '.webp', '.svg']))
                 self.max_file_size_mb = getattr(folder_config, 'max_file_size_mb', 100)
                 self.auto_ingest = getattr(folder_config, 'auto_ingest', True)
                 self.recursive = getattr(folder_config, 'recursive', True)
@@ -208,6 +208,7 @@ class FolderMonitor:
                 "files_ingested": len([f for f in self.file_states.values() if f.ingestion_status == "success"]),
                 "files_failed": len([f for f in self.file_states.values() if f.ingestion_status == "failed"]),
                 "files_pending": len([f for f in self.file_states.values() if f.ingestion_status == "pending"]),
+                "files_skipped": len([f for f in self.file_states.values() if f.ingestion_status == "skipped"]),
                 "last_scan_time": self.stats.get('last_scan_time'),
                 "check_interval": self.check_interval,
                 "scan_count": self.stats.get('scan_count', 0),
@@ -439,12 +440,15 @@ class FolderMonitor:
             # Prepare metadata
             metadata = {
                 "source": "folder_monitor",
+                "source_type": "folder_monitor",  # Proper source type
                 "original_path": file_path,
+                "original_filename": file_path,  # Ensure filename is preserved
                 "doc_path": file_state.doc_path,
                 "monitored_folder": self._get_parent_folder(file_path),
                 "file_size": file_state.size,
                 "file_hash": file_state.hash,
-                "ingestion_time": datetime.now().isoformat()
+                "ingestion_time": datetime.now().isoformat(),
+                "ingestion_method": "folder_monitor_auto"
             }
             
             # Ingest file
@@ -456,9 +460,25 @@ class FolderMonitor:
                 file_state.error_message = None
                 self.stats['files_ingested'] = self.stats.get('files_ingested', 0) + 1
                 self.logger.info(f"Successfully ingested: {os.path.basename(file_path)}")
+            elif result.get('status') == 'skipped':
+                # Handle skipped files (duplicates, no content, etc.)
+                reason = result.get('reason', 'unknown')
+                file_state.ingestion_status = "skipped"
+                file_state.last_ingested = datetime.now().isoformat()
+                file_state.error_message = f"Skipped: {reason}"
+                
+                if reason == 'duplicate':
+                    duplicate_id = result.get('duplicate_file_id', 'unknown')
+                    self.logger.info(f"Skipped duplicate file: {os.path.basename(file_path)} (existing: {duplicate_id})")
+                elif reason == 'no_content':
+                    self.logger.info(f"Skipped file with no content: {os.path.basename(file_path)}")
+                elif reason == 'no_chunks':
+                    self.logger.info(f"Skipped file with no chunks: {os.path.basename(file_path)}")
+                else:
+                    self.logger.info(f"Skipped file: {os.path.basename(file_path)} (reason: {reason})")
             else:
                 file_state.ingestion_status = "failed"
-                file_state.error_message = result.get('error', 'Unknown error')
+                file_state.error_message = result.get('error', f"Unknown error - status: {result.get('status', 'unknown')}")
                 self.stats['files_failed'] = self.stats.get('files_failed', 0) + 1
                 self.logger.error(f"Failed to ingest {file_path}: {file_state.error_message}")
                 
@@ -540,6 +560,41 @@ class FolderMonitor:
                 "changes_detected": len(changes),
                 "files_tracked": len(self.file_states)
             }
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+    
+    def retry_failed_files(self) -> Dict[str, Any]:
+        """Reset failed files to pending status for retry"""
+        try:
+            failed_files = [
+                file_path for file_path, file_state in self.file_states.items()
+                if file_state.ingestion_status == "failed"
+            ]
+            
+            if not failed_files:
+                return {
+                    "success": True,
+                    "message": "No failed files to retry",
+                    "files_reset": 0
+                }
+            
+            # Reset failed files to pending
+            for file_path in failed_files:
+                self.file_states[file_path].ingestion_status = "pending"
+                self.file_states[file_path].error_message = None
+            
+            self.logger.info(f"Reset {len(failed_files)} failed files to pending status")
+            
+            # If auto-ingest is enabled, process them immediately
+            if self.auto_ingest:
+                self._process_pending_files()
+            
+            return {
+                "success": True,
+                "message": f"Reset {len(failed_files)} failed files to pending",
+                "files_reset": len(failed_files)
+            }
+            
         except Exception as e:
             return {"success": False, "error": str(e)}
 

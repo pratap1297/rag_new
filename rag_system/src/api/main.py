@@ -2,7 +2,7 @@
 FastAPI Application
 Main API application for the RAG system
 """
-from fastapi import FastAPI, HTTPException, Depends, UploadFile, File, BackgroundTasks, WebSocket, Form
+from fastapi import FastAPI, HTTPException, Depends, UploadFile, File, BackgroundTasks, WebSocket, Form, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from typing import Dict, Any, Optional, List
@@ -33,8 +33,8 @@ try:
     from .models.requests import QueryRequest, UploadRequest
     from .models.responses import QueryResponse, UploadResponse, HealthResponse
 except ImportError:
-    from rag_system.src.api.models.requests import QueryRequest, UploadRequest
-    from rag_system.src.api.models.responses import QueryResponse, UploadResponse, HealthResponse
+    from .models.requests import QueryRequest, UploadRequest
+from .models.responses import QueryResponse, UploadResponse, HealthResponse
 
 try:
     from ..core.error_handling import RAGSystemError, QueryError, EmbeddingError, LLMError
@@ -45,13 +45,14 @@ try:
     from ..core.resource_manager import get_global_app, ManagedThreadPool
     from ..storage.feedback_store import FeedbackStore
 except ImportError:
-    from rag_system.src.core.error_handling import RAGSystemError, QueryError, EmbeddingError, LLMError
-    from rag_system.src.core.unified_error_handling import (
+    # Fallback to absolute imports when running as main module
+    from core.error_handling import RAGSystemError, QueryError, EmbeddingError, LLMError
+    from core.unified_error_handling import (
         ErrorCode, ErrorInfo, ErrorContext, Result, UnifiedError,
         format_api_response, get_http_status_code, QueryErrorHandler
     )
-    from rag_system.src.core.resource_manager import get_global_app, ManagedThreadPool
-    from rag_system.src.storage.feedback_store import FeedbackStore
+    from core.resource_manager import get_global_app, ManagedThreadPool
+    from storage.feedback_store import FeedbackStore
 
 try:
     from .management_api import create_management_router
@@ -1523,6 +1524,32 @@ Answer:"""
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))
 
+    @app.post("/folder-monitor/retry")
+    async def retry_failed_files():
+        """Retry failed file ingestion"""
+        try:
+            from ..monitoring.folder_monitor import folder_monitor
+            
+            if not folder_monitor:
+                raise HTTPException(status_code=503, detail="Folder monitor not initialized")
+            
+            result = folder_monitor.retry_failed_files()
+            
+            if result.get('success'):
+                return {
+                    "success": True,
+                    "message": result.get('message'),
+                    "files_reset": result.get('files_reset', 0),
+                    "timestamp": time.time()
+                }
+            else:
+                raise HTTPException(status_code=500, detail=result.get('error', 'Retry failed'))
+                
+        except HTTPException:
+            raise
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
+
     @app.delete("/documents/{doc_path:path}")
     async def delete_document(doc_path: str):
         """Delete a specific document and its vectors from the system"""
@@ -2560,6 +2587,137 @@ Answer:"""
             raise HTTPException(status_code=503, detail="Progress tracking not available")
         
         return progress_tracker.get_system_metrics()
+
+    # OpenAI-compatible models endpoint
+    @app.get("/v1/models")
+    async def list_models(request: Request):
+        """
+        OpenAI-compatible endpoint to list available models
+        This provides compatibility with OpenAI client libraries
+        """
+        try:
+            # Check if this is an internal health check call
+            user_agent = request.headers.get("user-agent", "")
+            if "internal" in user_agent.lower() or "health" in user_agent.lower():
+                # Return minimal response for internal calls
+                return {
+                    "object": "list",
+                    "data": [
+                        {
+                            "id": "rag-system-default",
+                            "object": "model",
+                            "created": int(time.time()),
+                            "owned_by": "rag-system",
+                            "permission": [],
+                            "root": "rag-system-default",
+                            "parent": None,
+                            "max_tokens": 4096
+                        }
+                    ]
+                }
+            
+            config_manager = container.get('config_manager')
+            config = config_manager.get_config()
+            
+            # Get current model configurations (note: it's 'embedding' not 'embeddings')
+            embedding_model = getattr(config.embedding, 'model_name', 'text-embedding-ada-002')
+            embedding_provider = getattr(config.embedding, 'provider', 'azure')
+            llm_model = getattr(config.llm, 'model_name', 'gpt-3.5-turbo')
+            llm_provider = getattr(config.llm, 'provider', 'azure')
+            
+            # Create model list in OpenAI format
+            models = [
+                {
+                    "id": embedding_model,
+                    "object": "model",
+                    "created": int(time.time()),
+                    "owned_by": f"rag-system-embeddings-{embedding_provider}",
+                    "permission": [],
+                    "root": embedding_model,
+                    "parent": None,
+                    "max_tokens": getattr(config.embedding, 'dimension', 1024)
+                },
+                {
+                    "id": llm_model,
+                    "object": "model", 
+                    "created": int(time.time()),
+                    "owned_by": f"rag-system-llm-{llm_provider}",
+                    "permission": [],
+                    "root": llm_model,
+                    "parent": None,
+                    "max_tokens": getattr(config.llm, 'max_tokens', 4096)
+                }
+            ]
+            
+            return {
+                "object": "list",
+                "data": models
+            }
+            
+        except Exception as e:
+            logging.error(f"Error listing models: {e}")
+            # Return a basic response even if config fails
+            return {
+                "object": "list",
+                "data": [
+                    {
+                        "id": "rag-system-default",
+                        "object": "model",
+                        "created": int(time.time()),
+                        "owned_by": "rag-system",
+                        "permission": [],
+                        "root": "rag-system-default",
+                        "parent": None,
+                        "max_tokens": 4096
+                    }
+                ]
+            }
+
+    @app.get("/v1/models/{model_id}")
+    async def get_model(model_id: str):
+        """
+        OpenAI-compatible endpoint to get specific model details
+        """
+        try:
+            config_manager = container.get('config_manager')
+            config = config_manager.get_config()
+            
+            # Check if the requested model matches our configured models
+            embedding_model = getattr(config.embedding, 'model_name', 'text-embedding-ada-002')
+            embedding_provider = getattr(config.embedding, 'provider', 'azure')
+            llm_model = getattr(config.llm, 'model_name', 'gpt-3.5-turbo')
+            llm_provider = getattr(config.llm, 'provider', 'azure')
+            
+            if model_id == embedding_model:
+                return {
+                    "id": embedding_model,
+                    "object": "model",
+                    "created": int(time.time()),
+                    "owned_by": f"rag-system-embeddings-{embedding_provider}",
+                    "permission": [],
+                    "root": embedding_model,
+                    "parent": None,
+                    "max_tokens": getattr(config.embedding, 'dimension', 1024)
+                }
+            elif model_id == llm_model:
+                return {
+                    "id": llm_model,
+                    "object": "model",
+                    "created": int(time.time()),
+                    "owned_by": f"rag-system-llm-{llm_provider}",
+                    "permission": [],
+                    "root": llm_model,
+                    "parent": None,
+                    "max_tokens": getattr(config.llm, 'max_tokens', 4096)
+                }
+            else:
+                raise HTTPException(status_code=404, detail=f"Model {model_id} not found")
+                
+        except HTTPException:
+            raise
+        except Exception as e:
+            logging.error(f"Error getting model {model_id}: {e}")
+            raise HTTPException(status_code=500, detail="Internal server error")
 
     logging.info("FastAPI application created")
     return app

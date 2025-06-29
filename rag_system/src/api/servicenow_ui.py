@@ -683,16 +683,17 @@ def create_servicenow_interface() -> gr.Blocks:
             outputs=[stats_display]
         )
         
-        # Auto-load stats on interface load
-        interface.load(
-            fn=servicenow_ui.get_servicenow_stats,
-            inputs=[],
-            outputs=[stats_display]
-        )
+        # Auto-load stats on interface load - DISABLED to prevent recursive API calls
+        # interface.load(
+        #     fn=servicenow_ui.get_servicenow_stats,
+        #     inputs=[],
+        #     outputs=[stats_display]
+        # )
     
     return interface
 
 if __name__ == "__main__":
-    # For testing the interface standalone
-    interface = create_servicenow_interface()
-    interface.launch(server_name="0.0.0.0", server_port=7861) 
+    # For testing the interface standalone - DISABLED to prevent recursive API calls
+    # interface = create_servicenow_interface()
+    # interface.launch(server_name="0.0.0.0", server_port=7861)
+    print("ServiceNow UI interface creation disabled to prevent recursive API calls") 
